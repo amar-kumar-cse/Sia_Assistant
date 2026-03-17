@@ -1,0 +1,17 @@
+customtkinter
+google-generativeai
+elevenlabs
+pygame
+python-dotenv
+pillow
+requests
+SpeechRecognition
+pyaudio
+PyQt5
+PyQt5-tools
+webrtcvad  # Optional: For advanced Voice Activity Detection
+keyboard  # Global hotkeys (requires admin on Windows)
+
+
+
+pyttsx3
