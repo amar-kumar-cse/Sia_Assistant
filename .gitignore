@@ -69,6 +69,7 @@ desktop.ini
 
 # Project specific
 memory.json.backup
+memory.db
 *.log
 *.tmp
 

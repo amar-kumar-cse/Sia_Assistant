@@ -1,5 +1,6 @@
+# ━━━ Core Dependencies ━━━
 customtkinter
-google-generativeai
+google-genai          # NEW: Updated Gemini SDK (replaces deprecated google-generativeai)
 elevenlabs
 pygame
 python-dotenv
@@ -12,6 +13,24 @@ PyQt5-tools
 webrtcvad  # Optional: For advanced Voice Activity Detection
 keyboard  # Global hotkeys (requires admin on Windows)
 
-
-
 pyttsx3
+edge-tts
+openai-whisper
+psutil
+wikipedia
+
+# ━━━ New: Advanced Features ━━━
+opencv-python       # Webcam capture for Visual Intelligence
+duckduckgo-search   # Web search (no API key needed!)
+pycaw               # Windows volume control
+comtypes            # Required by pycaw on Windows
+
+# ━━━ Enhanced Performance ━━━
+numpy               # Better numerical processing
+scipy               # Advanced audio processing
+soundfile           # Better audio I/O
+librosa             # Audio analysis
+matplotlib          # Visualization (for debugging)
+tqdm                # Progress bars
+aiofiles            # Async file operations
+asyncio             # Better concurrency

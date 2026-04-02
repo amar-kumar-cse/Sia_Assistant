@@ -1,0 +1,349 @@
+import os
+import requests
+import pygame
+import io
+import time
+from dotenv import load_dotenv
+import tempfile
+import subprocess
+import hashlib
+import sys
+import threading
+from typing import Optional, Callable, Dict
+from .logger import get_logger
+
+logger = get_logger(__name__)
+
+# Get config with error handling
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.append(BASE_DIR)
+
+CACHE_DIR = None
+try:
+    import config
+    CACHE_DIR = config.config.CACHE_DIR
+except ImportError as e:
+    print(f"⚠️ Config import failed: {e}")
+    CACHE_DIR = os.path.join(BASE_DIR, "cache")
+    os.makedirs(CACHE_DIR, exist_ok=True)
+
+# Initialize pygame with enhanced error handling
+try:
+    pygame.mixer.init(frequency=22050, size=-16, channels=2, buffer=512)
+    logger.info("✅ Pygame mixer initialized with enhanced settings")
+except pygame.error as e:
+    logger.error(f"❌ Pygame init failed: {e}")
+    # Create enhanced dummy mixer with better fallback
+    class EnhancedDummyMixer:
+        def __init__(self):
+            self._playing = False
+        def get_busy(self):
+            return self._playing
+        def load(self, *args):
+            return self
+        def play(self, *args):
+            self._playing = True
+            logger.warning("⚠️ Using dummy audio playback")
+            return self
+        def stop(self, *args):
+            self._playing = False
+        def music(self):
+            return self
+    pygame.mixer = EnhancedDummyMixer()
+    pygame.time.Clock = lambda: type('obj', (object,), {'tick': lambda x: None})()
+
+# Load environment variables
+load_dotenv()
+
+ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY")
+VOICE_ID = os.getenv("ELEVENLABS_VOICE_ID", "21m00Tcm4TlvDq8ikWAM")
+MODEL_ID = os.getenv("ELEVENLABS_MODEL", "eleven_turbo_v2")
+
+# Global state for animation synchronization
+_speaking_lock = threading.Lock()
+is_speaking = False
+is_streaming = False
+speech_start_time = None
+speech_duration = 0
+
+def _set_speaking_state(state: bool):
+    """Thread-safe setter for is_speaking global state."""
+    global is_speaking
+    with _speaking_lock:
+        is_speaking = state
+
+def _get_speaking_state() -> bool:
+    """Thread-safe getter for is_speaking global state."""
+    global is_speaking
+    with _speaking_lock:
+        return is_speaking
+
+# ━━━━━━ Emotion-Adaptive Voice Settings ━━━━━━
+# Uses Microsoft Edge TTS for natural, human-like voice
+# hi-IN-SwaraNeural = female Hindi voice (most natural sounding)
+# Optimized rate/pitch for each emotion to sound like a real person
+EMOTION_VOICE_MAP = {
+    "IDLE":      {"rate": "+0%",   "pitch": "+5Hz",   "voice": "hi-IN-SwaraNeural"},
+    "SMILE":     {"rate": "+3%",   "pitch": "+15Hz",  "voice": "hi-IN-SwaraNeural"},
+    "HAPPY":     {"rate": "+8%",   "pitch": "+25Hz",  "voice": "hi-IN-SwaraNeural"},
+    "EXCITED":   {"rate": "+12%",  "pitch": "+35Hz",  "voice": "hi-IN-SwaraNeural"},
+    "SAD":       {"rate": "-8%",   "pitch": "-15Hz",  "voice": "hi-IN-SwaraNeural"},
+    "CONFUSED":  {"rate": "-3%",   "pitch": "+8Hz",   "voice": "hi-IN-SwaraNeural"},
+    "SURPRISED": {"rate": "+8%",   "pitch": "+40Hz",  "voice": "hi-IN-SwaraNeural"},
+    "ANGRY":     {"rate": "+3%",   "pitch": "-8Hz",   "voice": "hi-IN-SwaraNeural"},
+    "STRESSED":  {"rate": "-3%",   "pitch": "-3Hz",   "voice": "hi-IN-SwaraNeural"},
+}
+
+def _get_emotion_settings(emotion: Optional[str]) -> Dict[str, str]:
+    """Get voice settings for the given emotion."""
+    emotion = (emotion or "IDLE").upper().strip()
+    return EMOTION_VOICE_MAP.get(emotion, EMOTION_VOICE_MAP["IDLE"])
+
+def speak(text: str, emotion: Optional[str] = None, callback_started: Optional[Callable[[], None]] = None, callback_finished: Optional[Callable[[], None]] = None) -> None:
+    """
+    Synthesizes speech and plays it. Implements caching to save API calls.
+    """
+    global is_speaking, speech_start_time, speech_duration
+    
+    emo_settings = _get_emotion_settings(emotion)
+    
+    # Generate Cache Key based on text and emotion
+    raw_key = f"{text}_{emo_settings['voice']}_{emo_settings['rate']}_{emo_settings['pitch']}"
+    text_hash = hashlib.md5(raw_key.encode('utf-8')).hexdigest()
+    cache_path = os.path.join(CACHE_DIR, f"{text_hash}.mp3")
+    
+    # Check Cache First
+    if os.path.exists(cache_path):
+        _set_speaking_state(True)
+        speech_start_time = time.time()
+        if callback_started: callback_started()
+        
+        try:
+            pygame.mixer.music.load(cache_path)
+            pygame.mixer.music.play()
+            while pygame.mixer.music.get_busy():
+                pygame.time.Clock().tick(10)
+        except Exception as e:
+            print(f"Cache play error: {e}")
+            
+        speech_duration = time.time() - speech_start_time
+        _set_speaking_state(False)
+        if callback_finished: callback_finished()
+        return
+
+    # Decide on TTS Engine
+    use_edge_tts = False
+    if not ELEVENLABS_API_KEY or "your_elevenlabs_api_key" in ELEVENLABS_API_KEY:
+        use_edge_tts = True
+    elif len(text) < 50:
+        use_edge_tts = True
+        print(f"[Offline TTS Optimized]: Short response ({len(text)} chars)")
+
+    # No Cache - Generate using Fallback or ElevenLabs
+    if use_edge_tts:
+        print(f"[Sia (Edge-TTS) - {emotion or 'IDLE'}]: {text}")
+        _set_speaking_state(True)
+        if callback_started: callback_started()
+        
+        try:
+            voice = emo_settings["voice"]
+            rate = emo_settings["rate"]
+            pitch = emo_settings["pitch"]
+            CREATE_NO_WINDOW = 0x08000000 if os.name == 'nt' else 0
+            
+            # Save directly to cache_path
+            subprocess.run(
+                ["edge-tts", "--voice", voice, 
+                 "--rate", rate, "--pitch", pitch,
+                 "--text", text, "--write-media", cache_path], 
+                check=True, creationflags=CREATE_NO_WINDOW
+            )
+            
+            pygame.mixer.music.load(cache_path)
+            pygame.mixer.music.play()
+            while pygame.mixer.music.get_busy():
+                pygame.time.Clock().tick(10)
+        except Exception as e:
+            print(f"Fallback voice error: {e}")
+            
+        _set_speaking_state(False)
+        if callback_finished: callback_finished()
+        return
+
+    # ElevenLabs Generation
+    # Rate limiting
+    try:
+        try:
+            from .rate_limiter import voice_limiter
+        except ImportError:
+            from rate_limiter import voice_limiter
+        if not voice_limiter.is_allowed("elevenlabs"):
+            logger.warning("Voice API rate limit exceeded")
+            _set_speaking_state(False)
+            if callback_finished: callback_finished()
+            return
+    except ImportError:
+        logger.warning("Rate limiter not available")
+    
+    url = f"https://api.elevenlabs.io/v1/text-to-speech/{VOICE_ID}"
+    headers = {
+        "Accept": "audio/mpeg",
+        "Content-Type": "application/json",
+        "xi-api-key": ELEVENLABS_API_KEY
+    }
+    data = {
+        "text": text,
+        "model_id": MODEL_ID,
+        "voice_settings": {
+            "stability": 0.45,
+            "similarity_boost": 0.75,
+            "style": 0.35,
+            "use_speaker_boost": True
+        }
+    }
+
+    try:
+        response = requests.post(url, json=data, headers=headers)
+        
+        if response.status_code == 200:
+            # Save to Cache
+            with open(cache_path, "wb") as f:
+                f.write(response.content)
+                
+            _set_speaking_state(True)
+            speech_start_time = time.time()
+            if callback_started: callback_started()
+            
+            pygame.mixer.music.load(cache_path)
+            pygame.mixer.music.play()
+            
+            while pygame.mixer.music.get_busy():
+                pygame.time.Clock().tick(10)
+            
+            speech_duration = time.time() - speech_start_time
+            _set_speaking_state(False)
+            if callback_finished: callback_finished()
+                
+        else:
+            print(f"⚠️ ElevenLabs Error [{response.status_code}]: {response.text}")
+            _set_speaking_state(False)
+            
+    except Exception as e:
+        print(f"❌ Voice generation failed: {e}")
+        _set_speaking_state(False)
+
+def stop() -> None:
+    """Stops any currently playing audio."""
+    if pygame.mixer.music.get_busy():
+        pygame.mixer.music.stop()
+    
+    _set_speaking_state(False)
+
+def get_speaking_state() -> bool:
+    """Returns current speaking state."""
+    return _get_speaking_state()
+
+def estimate_speech_duration(text: str) -> float:
+    """
+    Estimates speech duration based on text length.
+    Average speaking rate: ~150 words per minute = 2.5 words per second
+    """
+    word_count = len(text.split())
+    estimated_duration = (word_count / 2.5)  # seconds
+    return estimated_duration
+
+
+def speak_chunk(text_chunk: str, is_first_chunk: bool = False) -> None:
+    """
+    Speak a text chunk with minimal latency.
+    Optimized for streaming - starts playing immediately.
+    
+    Args:
+        text_chunk: Short text segment to speak
+        is_first_chunk: If True, sets speaking state
+    """
+    global is_speaking, is_streaming, speech_start_time
+    
+    if not ELEVENLABS_API_KEY or "your_elevenlabs_api_key" in ELEVENLABS_API_KEY:
+        print(f"[Sia Chunk (Fallback)]: {text_chunk}")
+        try:
+             temp_file = os.path.join(tempfile.gettempdir(), "sia_chunk.mp3")
+             CREATE_NO_WINDOW = 0x08000000 if os.name == 'nt' else 0
+             subprocess.run(["edge-tts", "--voice", "hi-IN-SwaraNeural", "--text", text_chunk, "--write-media", temp_file], check=True, creationflags=CREATE_NO_WINDOW)
+             pygame.mixer.music.load(temp_file)
+             pygame.mixer.music.play()
+             while pygame.mixer.music.get_busy():
+                 pygame.time.Clock().tick(10)
+        except Exception as e:
+            pass
+        return
+
+    
+    url = f"https://api.elevenlabs.io/v1/text-to-speech/{VOICE_ID}"
+    
+    headers = {
+        "Accept": "audio/mpeg",
+        "Content-Type": "application/json",
+        "xi-api-key": ELEVENLABS_API_KEY
+    }
+    
+    # Optimized settings for speed
+    data = {
+        "text": text_chunk,
+        "model_id": MODEL_ID,
+        "voice_settings": {
+            "stability": 0.3,  # Lower for faster streaming
+            "similarity_boost": 0.6,
+            "optimize_streaming_latency": 4,  # Max optimization
+            "use_speaker_boost": True
+        }
+    }
+    
+    try:
+        response = requests.post(url, json=data, headers=headers, timeout=5)
+        
+        if response.status_code == 200:
+            audio_data = io.BytesIO(response.content)
+            
+            # Set speaking state on first chunk
+            if is_first_chunk:
+                _set_speaking_state(True)
+                is_streaming = True
+                speech_start_time = time.time()
+            
+            # Play immediately
+            pygame.mixer.music.load(audio_data)
+            pygame.mixer.music.play()
+            
+            # Wait for this chunk to complete
+            while pygame.mixer.music.get_busy():
+                pygame.time.Clock().tick(10)
+                
+        else:
+            print(f"⚠️ Chunk synthesis failed [{response.status_code}]")
+            
+    except Exception as e:
+        print(f"❌ Chunk error: {e}")
+
+
+def finish_streaming() -> None:
+    """Call this when streaming is complete."""
+    global speech_duration, speech_start_time
+    
+    if speech_start_time:
+        speech_duration = time.time() - speech_start_time
+    
+    _set_speaking_state(False)
+    is_streaming = False
+
+
+def speak_async(text: str, on_start: Optional[Callable[[], None]] = None, on_finish: Optional[Callable[[], None]] = None) -> None:
+    """Non-blocking speech synthesis. Runs in a background thread."""
+    import threading
+    def _run():
+        if on_start:
+            on_start()
+        speak(text)
+        if on_finish:
+            on_finish()
+    threading.Thread(target=_run, daemon=True).start()
