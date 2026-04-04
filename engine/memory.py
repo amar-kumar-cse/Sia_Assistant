@@ -5,6 +5,7 @@ import sys
 import time
 import copy  # ✅ FIX #1: For deepcopy operations
 from datetime import datetime
+from pathlib import Path  # ✅ FIX #13: For cross-platform path handling
 from typing import Optional, Dict, Any, List
 
 import threading
@@ -20,6 +21,21 @@ except ImportError:
 # Thread lock for SQLite safety
 _db_lock = threading.Lock()
 
+# ✅ FIX #13: Dynamic path resolution for cross-platform compatibility
+def _get_default_resume_path() -> str:
+    """Get default resume path that works on any OS."""
+    # Try common locations: Home/OneDrive/Documents or Home/Documents
+    onedrive_docs = Path.home() / "OneDrive" / "Documents" / "Resume.pdf"
+    home_docs = Path.home() / "Documents" / "Resume.pdf"
+    
+    if onedrive_docs.exists():
+        return str(onedrive_docs)
+    elif home_docs.exists():
+        return str(home_docs)
+    else:
+        # Default fallback to Documents folder even if doesn't exist yet
+        return str(home_docs)
+
 DEFAULT_MEMORY = {
     "personal": {
         "name": "Amar",
@@ -32,7 +48,7 @@ DEFAULT_MEMORY = {
         "interests": ["Coding", "Gaming", "Technology"]
     },
     "files": {
-        "resume_path": "C:\\Users\\yadav\\OneDrive\\Documents\\Resume.pdf",
+        "resume_path": _get_default_resume_path(),  # ✅ Dynamic path
         "college_portal": "https://cyborgerp.in/"
     },
     "skills": {

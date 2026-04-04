@@ -137,7 +137,24 @@ def _get_emotion_settings(emotion: Optional[str]) -> Dict[str, str]:
 
 def speak(text: str, emotion: Optional[str] = None, callback_started: Optional[Callable[[], None]] = None, callback_finished: Optional[Callable[[], None]] = None) -> None:
     """
-    Synthesizes speech and plays it. Implements caching to save API calls.
+    Synthesize speech and play audio with emotion-aware voice settings.
+    
+    Pipeline: Check cache → Select TTS engine → Generate audio → Play with callbacks
+    
+    Args:
+        text: Speech text to synthesize
+        emotion: Emotional tone (happy, sad, angry, confused, etc.)
+        callback_started: Called when playback starts
+        callback_finished: Called when playback finishes
+        
+    Returns:
+        None
+        
+    Note:
+        - Caches synthesized audio to avoid redundant API calls
+        - Falls back: ElevenLabs → Edge-TTS → Offline
+        - Thread-safe via VoiceState class
+        - Non-blocking with optional callbacks
     """
     emo_settings = _get_emotion_settings(emotion)
     

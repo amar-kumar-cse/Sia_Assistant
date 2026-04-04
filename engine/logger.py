@@ -12,12 +12,16 @@ os.makedirs(LOG_DIR, exist_ok=True)
 # Path to the specific log file
 LOG_FILE = os.path.join(LOG_DIR, "sia.log")
 
+# Track all loggers for cleanup
+_loggers = {}
+
 def get_logger(name):
     """
     Returns a configured logger instance for the given module name.
     Logs will be written to logs/sia.log and rotated when they reach 5MB.
     """
     logger = logging.getLogger(name)
+    _loggers[name] = logger  # ✅ Track logger for cleanup
     
     # Check if this logger already has handlers to prevent duplicate logs
     if not logger.handlers:
@@ -49,3 +53,20 @@ def get_logger(name):
         logger.addHandler(file_handler)
         
     return logger
+
+
+def cleanup_logger():
+    """
+    ✅ Close all logger handlers and release file handles.
+    Call this at application shutdown to prevent resource leaks.
+    """
+    for logger_name, logger in _loggers.items():
+        # Close and remove all handlers
+        for handler in logger.handlers[:]:  # Copy list to avoid modification during iteration
+            try:
+                handler.close()
+                logger.removeHandler(handler)
+            except Exception as e:
+                print(f"Error closing handler for {logger_name}: {e}")
+    
+    _loggers.clear()  # Clear the tracking dictionary

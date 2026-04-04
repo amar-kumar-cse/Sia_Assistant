@@ -282,8 +282,13 @@ def needs_web_search(text: str) -> bool:
 #  PERSONA BUILDERS
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-def get_advanced_persona():
-    """Advanced soulmate persona with career focus."""
+def get_advanced_persona() -> str:
+    """
+    Generate Sia's advanced AI soulmate persona with career focus.
+    
+    Returns:
+        str: Comprehensive persona prompt for the AI model
+    """
     user_memory = memory.get_all_memory_as_string()
     from datetime import datetime
     current_time = datetime.now().strftime("%I:%M %p")
@@ -521,7 +526,33 @@ chat_history: List[tuple] = memory.load_chat_history(n_turns=10)
 def think(user_input: str) -> str:
     """
     Process user input and return Sia's response.
-    Pipeline: validate → code-repair → mood → RAG → web search → Gemini → Ollama → offline
+    
+    This is the main entry point for Sia's reasoning pipeline:
+    1. **Validation**: Sanitize input and check for code repair requests
+    2. **Mood Detection**: Analyze user's emotional state
+    3. **Knowledge Base**: Search internal knowledge base for context
+    4. **Web Search**: Optional real-time information retrieval (if internet available)
+    5. **AI Generation**: Use Gemini with API key rotation + fallbacks
+    6. **Offline Fallback**: Use Ollama or smart offline responses if all else fails
+    
+    Args:
+        user_input: Raw text from user (e.g., "Amar bhai, mera code crash ho gaya")
+        
+    Returns:
+        str: Sia's response with emotion tag (e.g., "[SAD] Oye, debugging krte hain! 💪")
+        
+    Raises:
+        ValueError: If input is empty or null
+        
+    Examples:
+        >>> response = think("Hello Sia! How are you?")
+        >>> print(response)
+        "[SMILE] Main perfect hu yaar! 😊 Tum kaisa ho?"
+        
+    Note:
+        - Response always includes emotion tag: [SMILE], [SAD], [CONFUSED], etc.
+        - Uses chat history for context awareness
+        - Automatically falls back through multiple providers if one fails
     """
     global chat_history
 
@@ -646,8 +677,38 @@ Sia:"""
 
 def think_streaming(user_input: str) -> Generator[str, None, None]:
     """
-    Streaming version of think() — yields text chunks as they arrive.
-    Falls back to Ollama streaming, then a smart offline message.
+    Streaming version of think() that yields response chunks as they arrive.
+    
+    Perfect for real-time UI updates - user sees Sia typing as response generates.
+    Uses same pipeline as think() but processes response incrementally.
+    
+    Flow:
+    1. Validate and sanitize input
+    2. Build prompt with persona + context
+    3. Stream from Gemini (yields chunks immediately)
+    4. On Gemini failure → fall back to Ollama streaming
+    5. On complete failure → yield offline response
+    6. Save complete response to chat history
+    
+    Args:
+        user_input: Raw text from user (will be sanitized)
+        
+    Yields:
+        str: Response chunks (e.g., "[SMILE] Main", " perfect", " hu yaar!")
+        
+    Raises:
+        N/A - All exceptions are caught and result in graceful fallback
+        
+    Examples:
+        >>> for chunk in think_streaming("Namaste Sia!"):
+        ...     print(chunk, end='')  # Real-time printing
+        [SMILE] Hi Amar! Kya baat hai?
+        
+    Note:
+        - Each chunk arrives as soon as available (typical 100-500ms delays)
+        - Stream errors are recovered: partial content is preserved
+        - Perfect for voice synthesis pipeline (speak as chunks arrive)
+        - Accumulated text saved to memory even on network failures
     """
     global chat_history
 
