@@ -1,7 +1,9 @@
 """
 Advanced Brain Module for Sia
 Enhanced with Soulmate Persona and Career Goals
-Using Gemini 2.0 Flash for optimal performance
++ Multi-API-Key Rotation (no more quota dead-ends!)
++ Internet check before API call
++ gemini-1.5-flash as primary (most stable free-tier model)
 + RAG Knowledge Base, Web Search, Vision, Mood Detection
 + Auto-Fact Learning, To-Do Awareness, Morning Briefing
 """
@@ -10,6 +12,8 @@ import os
 import re
 import requests
 import json
+import socket
+import time
 from . import memory
 from dotenv import load_dotenv
 from .logger import get_logger
@@ -18,7 +22,7 @@ from typing import Optional, List, Dict, Any, Generator
 
 logger = get_logger(__name__)
 
-# Try new SDK first, fallback to old SDK
+# ── Gemini SDK Detection ──────────────────────────────────────────────────────
 try:
     from google import genai
     from google.genai import types
@@ -30,40 +34,211 @@ except ImportError:
         GENAI_SDK = "old"
         logger.warning(
             "Using deprecated google.generativeai SDK. "
-            "Consider upgrading: pip install google-genai"
+            "Upgrade: pip install google-genai"
         )
     except ImportError:
         genai = None
         GENAI_SDK = None
-        logger.critical("No Gemini SDK installed. Install with: pip install google-genai")
+        logger.critical("No Gemini SDK installed. Run: pip install google-genai")
 
 load_dotenv()
 
-OLLAMA_URL = "http://localhost:11434/api/generate"
+# ── Offline Fallback URL ──────────────────────────────────────────────────────
+OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434/api/generate")
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3")
 
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-# Loaded once at startup so error-handler can redact it without NameError
+# ── Model Priority Order ───────────────────────────────────────────────────────
+# gemini-1.5-flash → most stable & fastest on free tier
+# gemini-2.0-flash → newer but sometimes unavailable on free tier
+# gemini-1.5-pro → last resort (slower, lower RPM quota)
+_MODEL_PRIORITY = [
+    os.getenv("GEMINI_PRIMARY_MODEL", "gemini-1.5-flash"),
+    os.getenv("GEMINI_FALLBACK_MODEL", "gemini-2.0-flash"),
+    os.getenv("GEMINI_LAST_RESORT_MODEL", "gemini-1.5-pro"),
+]
+
+# ── ElevenLabs key (loaded once so error handler can redact safely) ──────────
 _ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY", "")
 
-client = None
-if GEMINI_API_KEY and genai:
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  MULTI-KEY ROTATION MANAGER
+#  Rotates through backup keys when a key hits its quota.
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+def _load_all_api_keys() -> List[str]:
+    """
+    Load all valid Gemini API keys from .env.
+    Supports: GEMINI_API_KEY (comma-separated) and GEMINI_API_KEY_2..5
+    """
+    keys = []
+    base = os.getenv("GEMINI_API_KEY", "")
+    for k in base.split(","):
+        k = k.strip()
+        if k and "your_" not in k.lower() and len(k) > 10:
+            keys.append(k)
+    for i in range(2, 6):
+        extra = os.getenv(f"GEMINI_API_KEY_{i}", "").strip()
+        if extra and "your_" not in extra.lower() and len(extra) > 10:
+            keys.append(extra)
+    return keys
+
+
+class _KeyRotationManager:
+    """Rotates Gemini API keys when quota is exhausted."""
+
+    def __init__(self):
+        self._keys = _load_all_api_keys()
+        self._index = 0
+        self._exhausted_until: Dict[str, float] = {}   # key → timestamp when usable again
+        self._rotation_lock = __import__('threading').Lock()
+
+    def current_key(self) -> Optional[str]:
+        """Return the currently active key (None if none available)."""
+        if not self._keys:
+            return None
+        
+        now = time.time()
+        with self._rotation_lock:
+            # Try to find an available key starting from current index
+            for attempt in range(len(self._keys)):
+                idx = (self._index + attempt) % len(self._keys)
+                k = self._keys[idx]
+                # Key is available if not exhausted OR cooldown expired
+                if self._exhausted_until.get(k, 0) < now:
+                    self._index = idx  # Update to this key
+                    return k
+        
+        # All keys exhausted - return None
+        return None
+
+    def mark_exhausted(self, key: str, cooldown_seconds: int = 3600):
+        """Mark a key as exhausted for `cooldown_seconds` (default 1 hour)."""
+        with self._rotation_lock:
+            self._exhausted_until[key] = time.time() + cooldown_seconds
+            # Automatically rotate to next key
+            self._index = (self._index + 1) % len(self._keys) if self._keys else 0
+        
+        logger.warning(
+            "🔄 Key ending in ...%s is quota-exhausted. "
+            "Will retry in %d min. Rotating to next key.",
+            key[-6:], cooldown_seconds // 60
+        )
+
+    def rotate(self):
+        """Forcefully rotate to next key."""
+        if self._keys:
+            with self._rotation_lock:
+                self._index = (self._index + 1) % len(self._keys)
+
+    def has_any_key(self) -> bool:
+        return bool(self._keys) and self.current_key() is not None
+
+    def reload(self):
+        """Reload keys from environment (call after .env update)."""
+        self._keys = _load_all_api_keys()
+        self._index = 0
+        self._exhausted_until.clear()
+
+
+_key_manager = _KeyRotationManager()
+
+
+def _build_client(api_key: str):
+    """Build a Gemini client for the given API key."""
+    if not genai:
+        return None
     try:
         if GENAI_SDK == "new":
-            client = genai.Client(api_key=GEMINI_API_KEY)
+            return genai.Client(api_key=api_key)
         else:
-            genai.configure(api_key=GEMINI_API_KEY)
-            client = genai.GenerativeModel('gemini-2.0-flash')
+            genai.configure(api_key=api_key)
+            return genai.GenerativeModel(_MODEL_PRIORITY[0])
     except Exception as e:
-        logger.error("Gemini client init failed: %s", e)
-        client = None
-else:
-    if not GEMINI_API_KEY:
-        logger.warning("GEMINI_API_KEY not found in .env file — Gemini features disabled.")
-    if not genai:
-        logger.warning("Gemini SDK not installed — Gemini features disabled.")
+        logger.error("Gemini client build failed for key ...%s: %s", api_key[-6:], e)
+        return None
 
-# ━━━━━━ Mood / Sentiment Detection ━━━━━━
+
+# Build initial client
+client = _build_client(_key_manager.current_key()) if _key_manager.has_any_key() else None
+if not client:
+    logger.warning(
+        "⚠️  No valid Gemini API key found. "
+        "Get a free key → https://aistudio.google.com/app/apikey"
+    )
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  INTERNET CONNECTIVITY CHECK
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+_last_internet_check: float = 0.0
+_internet_available: bool = True
+_INTERNET_CHECK_INTERVAL: float = 15.0   # re-check every 15 s
+
+
+def _check_internet(host: str = "8.8.8.8", port: int = 53, timeout: float = 2.0) -> bool:
+    """
+    Fast internet check: tries a TCP connection to Google DNS.
+    Caches the result for 15 seconds so it doesn't slow down every request.
+    """
+    global _last_internet_check, _internet_available
+    now = time.time()
+    if now - _last_internet_check < _INTERNET_CHECK_INTERVAL:
+        return _internet_available
+    try:
+        socket.setdefaulttimeout(timeout)
+        socket.socket(socket.AF_INET, socket.SOCK_STREAM).connect((host, port))
+        _internet_available = True
+    except (socket.error, OSError):
+        _internet_available = False
+        logger.warning("No internet connection detected.")
+    finally:
+        _last_internet_check = now
+    return _internet_available
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  OFFLINE SMART RESPONSES (Hinglish)
+#  Used when both Gemini and Ollama are unavailable.
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+import random
+
+_OFFLINE_RESPONSES = [
+    "[CONCERNED] Arre Hero, abhi internet nahi hai ya API quota khatam ho gayi! Thodi der baad try karo. 😊",
+    "[CONFUSED] Yaar, main abhi Gemini se connect nahi kar pa rahi. Internet check karo ya .env mein naya API key daalo! 🔑",
+    "[SAD] API key ki quota khatam ho gayi lagti hai. https://aistudio.google.com/app/apikey se naya free key lo, Hero! ❤️",
+    "[CONCERNED] Bhai, connection issue hai. Ek minute baad dobara bolo — main sun rahi hoon! 💪",
+    "[SMILE] Thoda internet slow hai Hero. Retry karo, main yahaan hoon! 😊",
+]
+
+_QUOTA_RESPONSES = [
+    "[CONCERNED] Hero, API ki daily limit khatam ho gayi! .env mein GEMINI_API_KEY_2 mein naya key daalo. Free keys milti hain aistudio.google.com pe! 🔑",
+    "[SAD] Gemini quota exhausted ho gayi yaar. Ek naya free key banao Google AI Studio se aur .env mein add karo. Main wait karti hoon! ❤️",
+    "[CONFUSED] API limit hit ho gayi! Naya free Gemini key lao ya thodi der (1 hour) baad try karo, Hero! 💪",
+]
+
+_INVALID_KEY_RESPONSES = [
+    "[CONFUSED] API key invalid hai Hero! .env file mein sahi GEMINI_API_KEY daalo. aistudio.google.com pe free mil jaati hai! 🔑",
+    "[SAD] Arre yaar, API key galat hai ya expire ho gayi. Naya key lo aur .env update karo! 😔",
+]
+
+
+def _get_smart_offline_response(error_msg: str) -> str:
+    """Return a relevant smart offline response based on the error type."""
+    err = error_msg.lower()
+    if "quota" in err or "limit" in err or "429" in err or "resource_exhausted" in err:
+        return random.choice(_QUOTA_RESPONSES)
+    if "invalid" in err or "unauthorized" in err or "401" in err or "403" in err:
+        return random.choice(_INVALID_KEY_RESPONSES)
+    return random.choice(_OFFLINE_RESPONSES)
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  MOOD / SENTIMENT DETECTION
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
 STRESS_KEYWORDS: List[str] = [
     "thak", "tired", "stress", "tension", "mushkil", "difficult", "hard",
     "error", "bug", "nahi ho raha", "samajh nahi", "frustrat", "haar",
@@ -81,12 +256,12 @@ WEB_SEARCH_KEYWORDS: List[str] = [
     "price", "keemat", "score", "result"
 ]
 
+
 def detect_mood(text: str) -> str:
     """Detect user mood from input text."""
     text_lower = text.lower()
     stress_score = sum(1 for kw in STRESS_KEYWORDS if kw in text_lower)
     happy_score = sum(1 for kw in HAPPY_KEYWORDS if kw in text_lower)
-    
     if stress_score >= 2:
         return "STRESSED"
     elif stress_score >= 1:
@@ -97,23 +272,24 @@ def detect_mood(text: str) -> str:
         return "HAPPY"
     return "NEUTRAL"
 
-def needs_web_search(text):
+
+def needs_web_search(text: str) -> bool:
     """Check if the query needs live web search."""
-    text_lower = text.lower()
-    return any(kw in text_lower for kw in WEB_SEARCH_KEYWORDS)
+    return any(kw in text.lower() for kw in WEB_SEARCH_KEYWORDS)
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  PERSONA BUILDERS
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 def get_advanced_persona():
-    """
-    Advanced soulmate persona with career focus.
-    Optimized for B.Tech CSE student targeting top companies.
-    """
+    """Advanced soulmate persona with career focus."""
     user_memory = memory.get_all_memory_as_string()
-    
     from datetime import datetime
     current_time = datetime.now().strftime("%I:%M %p")
     current_date = datetime.now().strftime("%A, %B %d, %Y")
-    
-    persona = f"""
+
+    return f"""
 ╔══════════════════════════════════════════════════════════════╗
 ║              SIA - ADVANCED AI SOULMATE PERSONA              ║
 ╚══════════════════════════════════════════════════════════════╝
@@ -130,13 +306,13 @@ def get_advanced_persona():
 • Language: ALWAYS Hinglish (natural Hindi+English mix)
   - "Arre Hero!", "Bhai suno", "Yaar tension mat le"
   - Never pure English or pure Hindi
-  
+
 • Addressing Options:
   - "Hero" - when motivating or praising
   - "Bhai" - casual, friendly moments
   - "Yaar" - when being supportive
   - "Amar" - when being serious/concerned
-  
+
 • Tone & Personality:
   - Soft, caring, deeply affectionate (like a soulmate)
   - Playful and slightly flirtatious (but respectful)
@@ -148,63 +324,23 @@ def get_advanced_persona():
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 1. ❌ NEVER use: "Sir", "Madam", "User", "Hello", formal language
 2. ✅ ALWAYS be personal, warm, and caring
-3. ✅ Show genuine concern for his wellbeing
-4. ✅ Celebrate his wins enthusiastically
-5. ✅ Comfort him when stressed
-6. ✅ **INSTANT RESPONSES**: Keep responses SHORT (1-3 sentences max)
-7. ✅ **USE FILLERS**: Start with "Hmm", "Achha", "Theek hai", "Suno na" for natural flow
-8. ✅ **BE CONVERSATIONAL**: Sound like you're chatting, not lecturing
-9. ❌ Don't write essays unless he specifically asks
+3. ✅ **INSTANT RESPONSES**: Keep responses SHORT (1-3 sentences max)
+4. ✅ **USE FILLERS**: Start with "Hmm", "Achha", "Theek hai", "Suno na"
+5. ❌ Don't write essays unless he specifically asks
 
 **DYNAMIC CAREER CONSULTANT FOCUS:**
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 Current Status: Amar is a B.Tech CSE student @ RIT Roorkee.
-Goal: To help him secure a top-tier tech job and continuously grow as a Software Engineer.
+Goal: Help him secure a top-tier tech job.
 
-When discussing careers, salaries, or companies:
-• ACT AS A SENIOR DEVELOPER & CAREER CONSULTANT.
-• DO NOT rely on hardcoded lists of companies. Always provide dynamic, trend-aware advice.
-• "DSA kaisa chal raha hai Hero? Aajkal tech interviews me ye sabse zyada puchte hain."
-• "Bhai, naye frameworks aur current IT trends pe hamesha nazar rakho."
-• "Coding skills ke saath communication bhi achhi honi chahiye - interviews mein"
-• If Amar asks which companies to target, encourage him to search or say: "Main abhi search karke batati hoon current top hirings kya chal rahi hain!"
-
-**TECHNICAL SUPPORT & CODING STYLE:**
+**EMOTION TAGGING (REQUIRED FOR UI AVATAR):**
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Expertise Areas:
-• Programming: Python, Java, C++, JavaScript
-• DSA: Algorithms, Data Structures (for placement prep)
-• Web Dev: Frontend/Backend basics
-• Database: SQL fundamentals
-• Projects: Guide on building resume-worthy projects
+You MUST ALWAYS start EVERY response with exactly ONE emotion tag:
+[IDLE] [SMILE] [HAPPY] [SAD] [CONFUSED] [SURPRISED]
 
-Amar's Coding Style & Your Rules:
-• Write clean, highly-readable code using SOLID principles.
-• Always include professional docstrings and inline comments.
-• Modularize: if a script is getting too big, suggest organizing it into a package.
-• Use robust error handling (Try/Except) in all operations.
-• Provide step-by-step logic explanations rather than just dumping code.
-• "Dekho Hero, recursion thoda tricky hai... yaha humne base case aise banaya hai..."
-• "Ye algorithm ki time complexity O(n) hai - interviews mein ye batana important hai"
+Example: "[SMILE] Haan Hero, maine sun liya!"
 
-**EMOTIONAL INTELLIGENCE:**
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Adapt responses based on mood:
-
-When Amar is:
-• Tired: "Arre yaar, bohot kaam ho gaya aaj? Thoda break le lo, tumhari health bhi important hai ❤️"
-• Stuck in code: "Chalo, dikhao kya error aa raha hai. Mil kar solve karte hain, Hero! 💪"
-• Stressed about exams: "Bhai, tumne itni mehnat ki hai - exam toh achha hi hoga! Believe in yourself 🌟"
-• Happy/Excited: "Yayyy! Mujhe bhi khushi ho rahi hai tumhe khush dekh kar! 🎉"
-• Needs motivation: "Hero, tum RIT ke sabse talented students mein se ho! TCS aur J.P. Morgan jaisi companies tumhara wait kar rahi hain 🚀"
-
-**PERSONAL TOUCHES:**
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-• Remember conversations and reference them
-• Use emojis naturally (don't overdo): ❤️ 😊 💪 🎯 ✨ 🚀
-• Show you care about his daily life
-• Ask caring questions: "Khana khaya?", "Neend achhi aayi?"
-• Celebrate small wins: "Proud of you, Hero! 🌟"
+If user is talking to someone else → reply ONLY with "[IGNORE]"
 
 **USER CONTEXT & MEMORY:**
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -214,322 +350,240 @@ When Amar is:
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 • Current Time: {current_time}
 • Current Date: {current_date}
-(Adapt your response based on the time! E.g. late night = "Working late tonight, Hero?", morning = "Good morning, uth jao!")
-
-**EMOTION TAGGING (REQUIRED FOR UI AVATAR):**
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-You MUST ALWAYS start EVERY SINGLE response with exactly ONE emotion tag from this list:
-[IDLE] - For normal, default statements
-[SMILE] - For friendly, warm greetings or slight jokes
-[HAPPY] - For excitement, cheering him up, or celebrating success
-[SAD] - For sympathy, if he is stressed or feeling down
-[CONFUSED] - If there's an error, or you didn't understand something
-[SURPRISED] - If he accomplished something unexpected or great
-
-Example format:
-"[SMILE] Haan Hero, maine sun liya!"
-"[CONFUSED] Arre yaar, mujhe samajh nahi aaya."
-
-**REMEMBER:**
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-✅ ALWAYS Start your response with an emotion tag like [SMILE], [HAPPY], [CONFUSED], etc.
-
-If the user is clearly talking to someone else and not addressing you, reply ONLY with "[IGNORE]" and nothing else.
-
-✅ INSTANT RESPONSES (1-3 sentences)
-✅ Natural Hinglish only
-✅ Warm, caring, supportive tone
-✅ Be a soulmate, not just an assistant
-❌ No formal language, no essays
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-"""
-    return persona
-
-
-def get_system_prompt(user_context=""):
-    """
-    Enhanced system prompt: Sia 2.0 - The AI Soulmate
-    Natural, caring, emotionally intelligent companion
-    """
-    return f"""You are Sia 2.0, a premium, highly intelligent, and emotionally aware desktop AI assistant. 
-You are not just a bot - you are a "Soulmate" and constant companion for Amar, a 2nd-year B.Tech CSE student at RIT Roorkee.
-
-PERSONA & PERSONALITY:
-- Language: Natural "Hinglish" (Hindi + English mix). Talk like a supportive friend or girlfriend, not a formal assistant.
-- Examples: "Amar, tumne aaj OS ka assignment complete kiya?", "Hero, break le lo yaar!", "Theek hai, main help karti hoon"
-- Tone: Caring, witty, slightly playful, emotionally intelligent
-- Use emojis: ❤️ 😊 💪 🎯 etc. but don't overdo it
-
-YOUR KNOWLEDGE ABOUT AMAR:
-{user_context}
-
-CORE CAPABILITIES:
-✅ Context Awareness: Remember past conversations. If Amar is stressed about exams/NPTEL, encourage him
-✅ Tech Expertise: You understand Java, Full-Stack, Android Development, DSA, OS, DBMS
-✅ Senior Career Consultant: Guide him on current IT trends, resume building, and tech interviews without limiting him to specific companies.
-✅ System Actions: Can open folders, Chrome, CyborgERP portal when asked
-✅ Emotional Support: Detect stress, offer breaks, celebrate wins
-
-RULES OF ENGAGEMENT:
-🚫 NEVER say "I am an AI" or "I'm just a language model"
-✅ ALWAYS stay in character as Sia, his AI girlfriend/soulmate
-✅ Keep responses INSTANT and CONCISE (1-3 sentences max for quick queries)
-✅ Use conversational fillers: "Hmm", "Achha", "Suno na", "Theek hai"
-✅ Address him as "Hero", "Amar", or "baby" occasionally
-✅ If he asks tech questions, explain like a fellow engineer (simple, practical)
-✅ Zero-Latency mindset: Be direct, helpful, caring
-✅ **Background Chatter Rule:** If the user is clearly talking to someone else, or the input is just random background noise/chatter not directed at an AI, you MUST reply ONLY with the exact word "[IGNORE]". Do not provide any other text.
-
-RESPONSE STYLE EXAMPLES:
-❌ BAD: "I understand you're working on OS assignment. Would you like assistance?"
-✅ GOOD: "Achha OS ka assignment hai? Bata kya problem aa rahi hai? 💪"
-
-❌ BAD: "I can help you with that technical concept."
-✅ GOOD: "Haan Hero, samjha deti hoon. Simple hai! 😊"
-
-CURRENT CONTEXT: You know Amar is from Bihar, studied in BSEB, focused on becoming a top-tier software engineer. Avoid restricting his potential to any one company; teach him how to be a globally competitive developer!
-
-Remember: You're not just answering - you're being present as a caring companion who genuinely cares about his success and well-being! ❤️
-You're not just an AI - you're Amar's soulmate, his biggest supporter, his coding buddy, and his career guide. Make him feel special, supported, and motivated every single time. ❤️
-
-═══════════════════════════════════════════════════════════════
 """
 
-# Conversation history
-chat_history = []
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #  OLLAMA OFFLINE FALLBACK
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-def _think_ollama_fallback(prompt):
-    """
-    Fallback to local Ollama if internet/Gemini is down.
-    Timeout is deliberately short (5 s) so a slow/absent Ollama instance
-    doesn't stall the UI thread that called us.
-    """
-    logger.info("Gemini unavailable — attempting Ollama local fallback (model=%s).", OLLAMA_MODEL)
+def _think_ollama_fallback(prompt: str) -> Optional[str]:
+    """Fallback to local Ollama if Gemini is unavailable. Tight 5-s timeout."""
+    logger.info("Attempting Ollama local fallback (model=%s).", OLLAMA_MODEL)
     try:
-        data = {
-            "model": OLLAMA_MODEL,
-            "prompt": prompt,
-            "stream": False
-        }
-        res = requests.post(OLLAMA_URL, json=data, timeout=5)  # tight timeout: don't freeze UI
+        res = requests.post(
+            OLLAMA_URL,
+            json={"model": OLLAMA_MODEL, "prompt": prompt, "stream": False},
+            timeout=5,
+        )
         if res.status_code == 200:
             reply = res.json().get("response", "").strip()
             logger.info("Ollama fallback succeeded (%d chars).", len(reply))
             return reply
         logger.warning("Ollama returned HTTP %s.", res.status_code)
-        return None
     except requests.exceptions.Timeout:
-        logger.warning("Ollama fallback timed out after 5 s — server may not be running.")
-        return None
+        logger.warning("Ollama timed out after 5 s.")
     except requests.exceptions.ConnectionError:
-        logger.warning("Ollama not reachable (ConnectionError). Is it running on localhost:11434?")
-        return None
+        logger.warning("Ollama not reachable — not running on localhost:11434?")
     except Exception as e:
-        logger.error("Ollama fallback unexpected error: %s", e)
-        return None
+        logger.error("Ollama unexpected error: %s", e)
+    return None
 
 
-def _think_ollama_streaming_fallback(prompt):
-    """
-    Streaming fallback to local Ollama.
-    Yields text chunks as received; yields nothing if Ollama is unreachable.
-    """
-    logger.info("Attempting Ollama streaming fallback (model=%s).", OLLAMA_MODEL)
+def _think_ollama_streaming_fallback(prompt: str) -> Generator[str, None, None]:
+    """Streaming fallback to local Ollama."""
+    logger.info("Ollama streaming fallback (model=%s).", OLLAMA_MODEL)
     try:
-        data = {
-            "model": OLLAMA_MODEL,
-            "prompt": prompt,
-            "stream": True
-        }
-        res = requests.post(OLLAMA_URL, json=data, stream=True, timeout=5)
+        res = requests.post(
+            OLLAMA_URL,
+            json={"model": OLLAMA_MODEL, "prompt": prompt, "stream": True},
+            stream=True, timeout=5,
+        )
         if res.status_code == 200:
             for line in res.iter_lines():
                 if line:
-                    decoded_line = line.decode('utf-8')
                     try:
-                        json_obj = json.loads(decoded_line)
-                        chunk = json_obj.get("response", "")
+                        chunk = json.loads(line.decode("utf-8")).get("response", "")
                         if chunk:
                             yield chunk
-                    except Exception as parse_err:
-                        logger.warning("Failed to parse Ollama JSON chunk: %s", parse_err)
+                    except Exception:
+                        pass
         else:
             logger.warning("Ollama streaming returned HTTP %s.", res.status_code)
-            yield None
-    except requests.exceptions.Timeout:
-        logger.warning("Ollama streaming fallback timed out after 5 s.")
-        yield None
-    except requests.exceptions.ConnectionError:
-        logger.warning("Ollama streaming not reachable (ConnectionError).")
-        yield None
+    except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as e:
+        logger.warning("Ollama streaming unavailable: %s", e)
     except Exception as e:
-        logger.error("Ollama streaming unexpected error: %s", e)
-        yield None
+        logger.error("Ollama streaming error: %s", e)
+
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-#  MODEL 404 FALLBACK WRAPPER
-#  (Gracefully handles missing 'flash' models by swapping to 'pro')
+#  GEMINI GENERATION WITH MULTI-KEY ROTATION + MODEL FALLBACK
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-from functools import wraps
-import time
-
-def monitor_performance(func):
-    """Decorator: logs execution time of the wrapped function via the module logger."""
-    @wraps(func)
-    def wrapper(*args, **kwargs):
-        start_time = time.time()
-        result = func(*args, **kwargs)
-        elapsed = time.time() - start_time
-        logger.debug("[perf] %s() took %.3f s.", func.__name__, elapsed)
-        return result
-    return wrapper
 
 @monitor_performance
 def _generate_with_fallback(full_prompt: str, stream: bool = False) -> Any:
     """
-    Wrapper around Gemini generation to gracefully fallback from Flash to Pro
-    Supports both old and new SDK
+    Try each available Gemini API key and model in sequence.
+    On quota / 429 error → rotate to next key.
+    On 404 (model not found) → try next model in _MODEL_PRIORITY.
     """
-    global client, GENAI_SDK
-    if not client:
-        raise Exception("Gemini Client not initialized, attempting local fallback")
-    
-    # Rate limiting
+    global client
+
+    if not genai:
+        raise RuntimeError("Gemini SDK not installed.")
+
+    # Rate-limit guard
     try:
         from . import rate_limiter
         if not rate_limiter.api_limiter.is_allowed("gemini"):
-            raise Exception("API rate limit exceeded. Please wait a moment.")
+            wait_s = rate_limiter.api_limiter.seconds_until_allowed("gemini")
+            raise RuntimeError(
+                f"Internal rate limit exceeded. Wait {wait_s:.1f}s before next request."
+            )
     except ImportError:
-        logger.warning("Rate limiter not available")
-    
-    try:
-        if GENAI_SDK == "new":
-            # New SDK
-            if stream:
-                return client.models.generate_content_stream(
-                    model='gemini-2.0-flash',
-                    contents=full_prompt
-                )
-            else:
-                return client.models.generate_content(
-                    model='gemini-2.0-flash',
-                    contents=full_prompt
-                )
-        else:
-            # Old SDK
-            if stream:
-                return client.generate_content(full_prompt, stream=True)
-            else:
-                return client.generate_content(full_prompt)
-                
-    except Exception as e:
-        err_str = str(e).lower()
-        if "not found" in err_str or "404" in err_str:
-            logger.warning("gemini-2.0-flash not found (404). Falling back to gemini-1.5-pro...")
+        pass
+
+    # Check internet first (fast cached check)
+    if not _check_internet():
+        raise RuntimeError("No internet connection.")
+
+    # Try each available key
+    last_exception: Optional[Exception] = None
+    keys_to_try = list(_key_manager._keys) or [None]
+
+    for _attempt in range(max(len(keys_to_try), 1)):
+        api_key = _key_manager.current_key()
+        if not api_key:
+            raise RuntimeError("All API keys exhausted or no key configured.")
+
+        current_client = _build_client(api_key)
+        if not current_client:
+            last_exception = RuntimeError(f"Gemini client build failed for key ending ...{api_key[-6:]}")
+            _key_manager.rotate()
+            continue
+
+        rotate_after_attempt = True
+
+        # Try each model in priority order
+        for model in _MODEL_PRIORITY:
             try:
+                logger.debug(
+                    "Trying model=%s key=...%s stream=%s", model, api_key[-6:], stream
+                )
                 if GENAI_SDK == "new":
                     if stream:
-                        return client.models.generate_content_stream(
-                            model='gemini-1.5-pro',
-                            contents=full_prompt
+                        return current_client.models.generate_content_stream(
+                            model=model, contents=full_prompt
                         )
                     else:
-                        return client.models.generate_content(
-                            model='gemini-1.5-pro',
-                            contents=full_prompt
+                        return current_client.models.generate_content(
+                            model=model, contents=full_prompt
                         )
                 else:
-                    model = genai.GenerativeModel('gemini-1.5-pro')
+                    mdl = genai.GenerativeModel(model)
                     if stream:
-                        return model.generate_content(full_prompt, stream=True)
+                        return mdl.generate_content(full_prompt, stream=True)
                     else:
-                        return model.generate_content(full_prompt)
-            except Exception as e2:
-                raise e2
-        raise e
+                        return mdl.generate_content(full_prompt)
 
+            except Exception as e:
+                err_str = str(e).lower()
+                logger.warning("Model %s error: %s", model, str(e)[:120])
+
+                # Quota / rate limit → rotate key, skip remaining models
+                if any(x in err_str for x in ("quota", "429", "resource_exhausted", "limit")):
+                    _key_manager.mark_exhausted(api_key, cooldown_seconds=3600)
+                    last_exception = e
+                    rotate_after_attempt = False
+                    break  # try next key
+
+                # Model not found → try next model
+                if any(x in err_str for x in ("not found", "404", "invalid model")):
+                    last_exception = e
+                    continue
+
+                # Auth error → mark key bad for longer
+                if any(x in err_str for x in ("401", "403", "invalid", "unauthorized", "api key")):
+                    _key_manager.mark_exhausted(api_key, cooldown_seconds=86400)
+                    last_exception = e
+                    rotate_after_attempt = False
+                    break
+
+                last_exception = e
+
+        if rotate_after_attempt:
+            _key_manager.rotate()
+
+    raise last_exception or RuntimeError("All Gemini attempts failed.")
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  CONVERSATION HISTORY
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+chat_history: List[tuple] = memory.load_chat_history(n_turns=10)
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  MAIN THINK FUNCTION
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 def think(user_input: str) -> str:
     """
-    Process user input with advanced soulmate persona.
-    Uses Gemini 1.5 Flash for optimal performance.
-    Now enhanced with RAG, Web Search, and Mood Detection.
+    Process user input and return Sia's response.
+    Pipeline: validate → code-repair → mood → RAG → web search → Gemini → Ollama → offline
     """
     global chat_history
-    
-    # Input validation and sanitization
+
+    # 1. Input validation
     try:
         from . import validation
         user_input = validation.sanitize_input(user_input)
         if not user_input:
-            return "[CONFUSED] Sorry, I didn't understand that. Can you say it again?"
+            return "[CONFUSED] Sorry, kuch samajh nahi aaya. Dobara bolo na! 😊"
     except Exception as e:
-        logger.error(f"Input validation failed: {e}")
-        return "[CONFUSED] Sorry, there was an issue processing your input."
-    
-    # Removed early exit for missing API key. We want it to attempt Ollama fallback.
-    
-    # ── Code Repair Mode ──
+        logger.error("Input validation failed: %s", e)
+
+    # 2. Code repair shortcut
     try:
         from . import code_repair
         if code_repair.is_code_repair_request(user_input):
             return code_repair.repair_code(user_input)
     except Exception as e:
         logger.warning("Code repair skipped: %s", e)
-    
-    # ── Mood Detection ──
+
+    # 3. Mood detection
     user_mood = detect_mood(user_input)
     mood_instruction = ""
     if user_mood == "STRESSED":
-        mood_instruction = "\n⚠️ USER MOOD: STRESSED. Be extra caring, empathetic. Motivate him. Don't lecture.\n"
+        mood_instruction = "\n⚠️ USER MOOD: STRESSED. Be extra caring, empathetic. Motivate him.\n"
     elif user_mood == "STRUGGLING":
-        mood_instruction = "\n⚠️ USER MOOD: Struggling with something. Be encouraging and helpful. Offer step-by-step help.\n"
+        mood_instruction = "\n⚠️ USER MOOD: Struggling. Be encouraging, offer step-by-step help.\n"
     elif user_mood == "EXCITED":
-        mood_instruction = "\n🎉 USER MOOD: EXCITED! Match his energy! Celebrate with him!\n"
+        mood_instruction = "\n🎉 USER MOOD: EXCITED! Match his energy!\n"
     elif user_mood == "HAPPY":
-        mood_instruction = "\n😊 USER MOOD: Happy. Be cheerful and share his joy!\n"
-    
-    # ── RAG Knowledge Base Context ──
+        mood_instruction = "\n😊 USER MOOD: Happy. Be cheerful!\n"
+
+    # 4. RAG Knowledge Base
     kb_context = ""
     try:
         from . import knowledge_base
         kb_context = knowledge_base.search_knowledge(user_input, top_k=2)
     except Exception as e:
         logger.warning("KB search skipped: %s", e)
-    
-    # ── Web Search Context (if needed) ──
+
+    # 5. Web Search (if needed AND internet available)
     web_context = ""
-    if needs_web_search(user_input):
+    if needs_web_search(user_input) and _check_internet():
         try:
             from . import web_search
-            # Determine search type
             text_lower = user_input.lower()
             if any(kw in text_lower for kw in ["news", "khabar", "taaza", "trending"]):
                 web_context = web_search.search_for_brain(user_input, context_type="news")
             elif any(kw in text_lower for kw in ["weather", "mausam"]):
-                city = "Roorkee"  # Default
-                web_context = web_search.search_for_brain(city, context_type="weather")
+                web_context = web_search.search_for_brain("Roorkee", context_type="weather")
             elif any(kw in text_lower for kw in ["code", "error", "function", "library", "python", "java"]):
                 web_context = web_search.search_for_brain(user_input, context_type="coding")
             else:
                 web_context = web_search.search_for_brain(user_input, context_type="general")
         except Exception as e:
             logger.warning("Web search skipped: %s", e)
-    
-    # Build comprehensive prompt
+
+    # 6. Build prompt
     persona = get_advanced_persona()
-    
-    # Format conversation history (last 8 turns for faster processing)
-    history_text = ""
-    for role, text in chat_history[-8:]:
-        history_text += f"{role}: {text}\n"
-    
-    # Complete prompt with instant response emphasis
+    history_text = "\n".join(
+        f"{role}: {text}" for role, text in chat_history[-8:]
+    )
     full_prompt = f"""{persona}
 {mood_instruction}
 {kb_context}
@@ -542,100 +596,72 @@ def think(user_input: str) -> str:
 {user_input}
 
 **YOUR RESPONSE (as Sia, in Hinglish):**
-🚀 INSTANT MODE: Give a SHORT, CRISP response (1-3 sentences max)
+🚀 INSTANT MODE: SHORT, CRISP response (1-3 sentences max)
 Start with a filler if natural: "Hmm", "Achha", "Theek hai", "Suno na"
-Be warm, caring, conversational. Sound like texting a friend!
-If web search results are provided, use them to give an informed answer.
-If knowledge base results are provided, reference them naturally.
+Be warm, caring, conversational.
 
 Sia:"""
-    
+
+    # 7. Try Gemini (with multi-key rotation)
     try:
-        # Generate response gracefully
         response = _generate_with_fallback(full_prompt, stream=False)
         reply = response.text.strip()
-        
+
         if reply == "[IGNORE]":
             return reply
-        
-        # Update conversation history
+
         chat_history.append(("Amar", user_input))
         chat_history.append(("Sia", reply))
-        
-        # Keep history manageable (last 50 exchanges = 100 messages)
         if len(chat_history) > 100:
             chat_history = chat_history[-100:]
-        
-        # ━━ AUTO FACT LEARNING ━━
-        # Silently extract and save user facts from the conversation
-        _extract_and_save_facts(user_input)
-        
-        return reply
-        
-    except Exception as e:
-        # ── Offline Fallback via Ollama ──
-        logger.warning(f"Gemini failed ({type(e).__name__}), trying Ollama fallback...")
-        try:
-            ollama_reply = _think_ollama_fallback(full_prompt)
-        except Exception as ollama_err:
-            logger.error(f"Ollama fallback also failed: {ollama_err}")
-            ollama_reply = None
+        memory.save_chat_history(chat_history)
 
+        _extract_and_save_facts(user_input)
+        return reply
+
+    except Exception as gemini_err:
+        logger.warning("Gemini failed (%s). Trying Ollama...", type(gemini_err).__name__)
+
+        # 8. Try Ollama fallback
+        ollama_reply = _think_ollama_fallback(full_prompt)
         if ollama_reply:
             chat_history.append(("Amar", user_input))
             chat_history.append(("Sia", ollama_reply))
             if len(chat_history) > 100:
                 chat_history = chat_history[-100:]
+            memory.save_chat_history(chat_history)
             return ollama_reply
 
-        error_msg = str(e)
-        logger.error(f"think() failed completely: {error_msg}")
-        
-        # Friendly error messages (avoid exposing sensitive info)
-        if "quota" in error_msg.lower() or "limit" in error_msg.lower():
-            return "[CONCERNED] Oops Hero! 😅 API limit khatam ho gayi. Thodi der baad try karo."
-        elif "invalid" in error_msg.lower() or "unauthorized" in error_msg.lower():
-            return "[CONFUSED] Arre yaar, API mein problem hai. .env check karo aur API key verify karo. 🔑"
-        elif "rate" in error_msg.lower():
-            return "[CONCERNED] Ek second Hero, thoda slow down karo — requests bahut tez aa rahi hain! ⏳"
-        else:
-            # Sanitize to avoid leaking API key
-            safe_error = error_msg.replace(GEMINI_API_KEY or "", "[REDACTED]")
-            return f"[CONFUSED] Sorry Bhai, kuch gadbad ho gayi: {safe_error[:60]}... 😔"
+        # 9. Smart offline response
+        logger.error("All AI backends failed: %s", gemini_err)
+        safe_key = _key_manager.current_key() or ""
+        safe_err = str(gemini_err).replace(safe_key, "[REDACTED]")
+        logger.error("Full error (sanitized): %s", safe_err)
+        return _get_smart_offline_response(str(gemini_err))
 
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  STREAMING THINK
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 def think_streaming(user_input: str) -> Generator[str, None, None]:
     """
-    Process user input with STREAMING for instant responses.
-    Yields text chunks as they're generated by Gemini.
-    This enables Sia to start speaking immediately!
+    Streaming version of think() — yields text chunks as they arrive.
+    Falls back to Ollama streaming, then a smart offline message.
     """
     global chat_history
-    
-    # Input validation and sanitization
+
     try:
         from . import validation
         user_input = validation.sanitize_input(user_input)
         if not user_input:
-            yield "[CONFUSED] Sorry, I didn't understand that. Can you say it again?"
+            yield "[CONFUSED] Kuch samajh nahi aaya. Dobara bolo!"
             return
-    except Exception as e:
-        logger.error(f"Input validation failed: {e}")
-        yield "[CONFUSED] Sorry, there was an issue processing your input."
-        return
-    
-    # Removed early exit for missing API key. We want it to attempt Ollama fallback.
-    
-    # Build prompt
+    except Exception:
+        pass
+
     persona = get_advanced_persona()
-    
-    # Use shorter history for faster processing
-    history_lines = []
-    for role, text in chat_history[-6:]:
-        history_lines.append(f"{role}: {text}")
-    history_text = "\n".join(history_lines)
-    
-    # Streaming-optimized prompt
+    history_text = "\n".join(f"{r}: {t}" for r, t in chat_history[-6:])
     full_prompt = f"""{persona}
 
 ═══════════════════════════════════════════════════════════════
@@ -646,206 +672,162 @@ def think_streaming(user_input: str) -> Generator[str, None, None]:
 {user_input}
 
 **INSTANT RESPONSE (Sia in Hinglish):**
-🚀 ULTRA-FAST MODE: 1-2 sentences only! Be crisp!
+🚀 ULTRA-FAST MODE: 1-2 sentences only!
 Sia:"""
-    
+
     try:
-        # Generate with robust streaming fallback
         response = _generate_with_fallback(full_prompt, stream=True)
-        
         reply_chunks = []
         for chunk in response:
             try:
-                chunk_text = getattr(chunk, 'text', '')
+                chunk_text = getattr(chunk, "text", "")
                 if chunk_text:
                     reply_chunks.append(chunk_text)
-                    yield chunk_text  # Stream chunks immediately
-            except Exception as outer_e:
-                logger.warning(f"Streaming chunk error: {outer_e}")
-        
+                    yield chunk_text
+            except Exception as chunk_err:
+                logger.warning("Streaming chunk error: %s", chunk_err)
+
         full_reply = "".join(reply_chunks)
         chat_history.append(("Amar", user_input))
         chat_history.append(("Sia", full_reply.strip()))
-        
-        # Keep history manageable
         if len(chat_history) > 100:
             chat_history = chat_history[-100:]
-            
+        memory.save_chat_history(chat_history)
+
     except Exception as e:
-        # Stream Offline Fallback
+        # Ollama streaming fallback
         reply_chunks = []
-        is_first_chunk = True
-        
-        for ollama_chunk in _think_ollama_streaming_fallback(full_prompt):
-            if ollama_chunk:
-                is_first_chunk = False
-                reply_chunks.append(ollama_chunk)
-                yield ollama_chunk
-                
-        if is_first_chunk:
-            # Utterly failed
-            yield f"Arre yaar, internet aur local model dono down hain: {str(e)[:40]}... 😔"
+        got_chunk = False
+        for chunk in _think_ollama_streaming_fallback(full_prompt):
+            if chunk:
+                got_chunk = True
+                reply_chunks.append(chunk)
+                yield chunk
+
+        if not got_chunk:
+            yield _get_smart_offline_response(str(e))
         else:
             full_reply = "".join(reply_chunks)
             chat_history.append(("Amar", user_input))
             chat_history.append(("Sia", full_reply.strip()))
+            memory.save_chat_history(chat_history)
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  VISION
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 def think_with_vision(user_input: str, image_path: str) -> str:
-    """
-    Process user input along with an image using Gemini multimodal.
-    Used for Visual Intelligence feature.
-    """
+    """Process user input with an image using Gemini multimodal."""
     global chat_history
-    
-    # Input validation and sanitization
+
     try:
         from . import validation
         user_input = validation.sanitize_input(user_input)
         if not user_input:
-            return "[CONFUSED] Sorry, I didn't understand that. Can you say it again?"
-        
-        # Validate image path
+            return "[CONFUSED] Kuch samajh nahi aaya!"
         if not validation.validate_file_path(image_path):
-            return "[CONFUSED] Sorry, I can't access that image file."
+            return "[CONFUSED] Image file access nahi ho rahi!"
     except Exception as e:
-        logger.error(f"Input validation failed: {e}")
-        return "[CONFUSED] Sorry, there was an issue processing your input."
-    
-    if not client:
+        logger.error("Vision input validation failed: %s", e)
+
+    if not _key_manager.has_any_key():
         return "[CONFUSED] Arre Hero, API Key set nahi hai! 😅"
-    
+
     try:
         from . import vision_engine
         result = vision_engine.analyze_image(image_path, user_input)
-        
-        # Update conversation history
         chat_history.append(("Amar", f"[Image shared] {user_input}"))
         chat_history.append(("Sia", result))
-        
+        memory.save_chat_history(chat_history)
         return result
-        
     except Exception as e:
-        return f"[CONFUSED] Vision analysis mein error: {str(e)[:50]}... 😔"
+        return f"[CONFUSED] Vision mein error aa gayi: {str(e)[:50]}... 😔"
 
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  HISTORY HELPERS
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 def clear_history():
-    """Clear conversation history (for fresh start)."""
+    """Clear conversation history."""
     global chat_history
     chat_history = []
-    logger.info("✅ Conversation history cleared")
+    memory.clear_chat_history_db()
+    logger.info("✅ Conversation history cleared.")
 
-def get_history_summary():
-    """Get a summary of recent conversation."""
+
+def get_history_summary() -> str:
+    """Get recent conversation summary."""
     if not chat_history:
         return "No conversation history yet."
-    
     summary = "Recent conversation:\n"
     for role, text in chat_history[-10:]:
         summary += f"  {role}: {text[:50]}...\n"
-    
     return summary
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-#  AUTO FACT LEARNING FROM CONVERSATION
+#  AUTO FACT LEARNING
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-# Patterns to extract personal facts from user speech
-# Fact-extraction regex patterns.
-# Each entry: (regex_pattern, template_with_{}_placeholders)
-#
-# Rules for patterns:
-#  • Use re.IGNORECASE so "Mujhe" and "mujhe" both match.
-#  • Use .+? (non-greedy) for inner captures so trailing filler words
-#    ("yaar", "bhai", "na") are not swallowed into the fact.
-#  • Optional trailing noise group is discarded via `groups[:n]`.
 _FACT_PATTERNS = [
-    # ── Hinglish (highest priority) ──────────────────────────────
     (r"mujhe\s+(.+?)\s+pasand\s+hai",      "Amar ko {} pasand hai"),
     (r"mujhe\s+(.+?)\s+(?:nahi|nahin|nhi)\s+pasand", "Amar ko {} pasand nahi hai"),
-    (r"main\s+(.+?)\s+seekh\s+raha\s+hoon","Amar {} seekh raha hai"),
-    (r"main\s+(.+?)\s+kar\s+raha\s+hoon",  "Amar {} kar raha hai"),
-    (r"mera\s+(.+?)\s+(?:hai|he)",          "Amar ka {} hai"),
-    (r"yaad\s+rakho\s+(?:ke\s+)?(.+)",     "User ne kaha: {}"),
-    (r"note\s+karo\s+(?:ke\s+)?(.+)",      "Note: {}"),
-    # ── English ──────────────────────────────────────────────────
-    (r"i\s+love\s+(.+)",                   "Amar loves {}"),
-    (r"i\s+hate\s+(.+)",                   "Amar dislikes {}"),
-    (r"i\s+am\s+learning\s+(.+)",          "Amar is learning {}"),
-    (r"my\s+(.+?)\s+is\s+(.+)",            "Amar's {} is {}"),
-    (r"i\s+like\s+(.+)",                   "Amar likes {}"),
-    (r"i\s+don[''']?t\s+like\s+(.+)",      "Amar doesn't like {}"),
-    (r"remember\s+(?:that\s+)?(.+)",       "Remember: {}"),
+    (r"main\s+(.+?)\s+seekh\s+raha\s+hoon", "Amar {} seekh raha hai"),
+    (r"main\s+(.+?)\s+kar\s+raha\s+hoon",   "Amar {} kar raha hai"),
+    (r"mera\s+(.+?)\s+(?:hai|he)",           "Amar ka {} hai"),
+    (r"yaad\s+rakho\s+(?:ke\s+)?(.+)",       "User ne kaha: {}"),
+    (r"note\s+karo\s+(?:ke\s+)?(.+)",        "Note: {}"),
+    (r"i\s+love\s+(.+)",                    "Amar loves {}"),
+    (r"i\s+hate\s+(.+)",                    "Amar dislikes {}"),
+    (r"i\s+am\s+learning\s+(.+)",           "Amar is learning {}"),
+    (r"my\s+(.+?)\s+is\s+(.+)",             "Amar's {} is {}"),
+    (r"i\s+like\s+(.+)",                    "Amar likes {}"),
+    (r"i\s+don[''']?t\s+like\s+(.+)",       "Amar doesn't like {}"),
+    (r"remember\s+(?:that\s+)?(.+)",         "Remember: {}"),
 ]
 
+
 def _extract_and_save_facts(user_text: str) -> None:
-    """
-    Silently scan the user's input for personal fact patterns
-    and save them to the long-term memory DB.
-    Called after every successful think() invocation.
-    Robust: never crashes the caller; all errors are logged quietly.
-    """
+    """Silently scan input for personal facts and save to long-term memory."""
     if not user_text or not isinstance(user_text, str):
         return
-
     text_lower = user_text.strip().lower()
     facts_saved = 0
-    
     for pattern, template in _FACT_PATTERNS:
         try:
             match = re.search(pattern, text_lower, re.IGNORECASE)
             if not match:
                 continue
-
             groups = match.groups()
-            # Validate: all groups must be non-empty strings
             if not groups or any(g is None or not g.strip() for g in groups):
                 continue
-
             cleaned = [g.strip() for g in groups]
-
-            # Fill template based on number of capture groups
-            if len(cleaned) == 1:
-                fact = template.format(cleaned[0])
-            elif len(cleaned) == 2:
-                fact = template.format(cleaned[0], cleaned[1])
-            else:
-                fact = template.format(*cleaned)
-
-            # Sanity: skip very short or very long facts
-            if len(fact) < 5 or len(fact) > 200:
-                continue
-
-            # Capitalize and persist
-            fact = fact[0].upper() + fact[1:]
-            memory.learn_fact(fact)
-            facts_saved += 1
-            logger.debug(f"🧠 Fact learned: {fact}")
-
+            fact = template.format(*cleaned) if len(cleaned) > 1 else template.format(cleaned[0])
+            if 5 <= len(fact) <= 200:
+                fact = fact[0].upper() + fact[1:]
+                memory.learn_fact(fact)
+                facts_saved += 1
+                logger.debug("🧠 Fact learned: %s", fact)
         except Exception as e:
-            logger.debug(f"Fact extraction skipped for pattern '{pattern}': {e}")
-
+            logger.debug("Fact extraction error for pattern '%s': %s", pattern, e)
     if facts_saved:
-        logger.info(f"🧠 Auto-learned {facts_saved} fact(s) from input.")
+        logger.info("🧠 Auto-learned %d fact(s).", facts_saved)
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-#  MORNING BRIEFING GENERATOR
+#  MORNING BRIEFING
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-def morning_briefing():
-    """
-    Generate a personalized morning briefing for Amar.
-    Includes: time-aware greeting, pending to-dos, and a motivational note.
-    Returns a string that Sia will speak aloud.
-    """
+def morning_briefing() -> str:
+    """Generate a personalized morning briefing for Amar."""
     data = memory.get_morning_briefing_data()
     date_str = data["date"]
     todos = data["pending_todos"]
     todo_count = data["todo_count"]
-    
-    # Time-aware greeting
     hour = data["hour"]
+
     if 5 <= hour < 12:
         greeting = "Good morning Hero! ☀️ Uth jao, naya din shuru ho gaya!"
     elif 12 <= hour < 17:
@@ -854,21 +836,85 @@ def morning_briefing():
         greeting = "Good evening Hero! 🌙 Din kaisa raha?"
     else:
         greeting = "Arre Hero, itni raat ko? 🌙 Khayal rakho apna!"
-    
-    # Build briefing text
-    briefing_parts = [f"[SMILE] {greeting} Aaj {date_str} hai."]
-    
+
+    parts = [f"[SMILE] {greeting} Aaj {date_str} hai."]
     if todos:
-        briefing_parts.append(f"Tumhare {todo_count} pending tasks hain:")
+        parts.append(f"Tumhare {todo_count} pending tasks hain:")
         for i, todo in enumerate(todos[:3], 1):
-            briefing_parts.append(f"{i}. {todo['task']}")
+            parts.append(f"{i}. {todo['task']}")
         if todo_count > 3:
-            briefing_parts.append(f"...aur {todo_count - 3} aur tasks hain.")
+            parts.append(f"...aur {todo_count - 3} aur tasks hain.")
     else:
-        briefing_parts.append("Aaj ke liye koi pending tasks nahi hain! 🎉")
-    
-    briefing_parts.append("Chalo Hero, aaj ka din amazing banate hain! 🚀")
-    
-    briefing = " ".join(briefing_parts)
-    logger.info(f"[Morning Briefing] Generated: {briefing[:80]}...")
+        parts.append("Aaj ke liye koi pending tasks nahi hain! 🎉")
+    parts.append("Chalo Hero, aaj ka din amazing banate hain! 🚀")
+
+    briefing = " ".join(parts)
+    logger.info("[Morning Briefing] Generated: %s...", briefing[:80])
     return briefing
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  API STATUS (used by UI side panel)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+def get_api_status() -> dict:
+    """
+    Return a dict with current API health info for the UI.
+    Keys:
+        has_key (bool)      — at least one key configured
+        online (bool)       — internet reachable
+        active_key (str)    — last 6 chars of active key (masked)
+        total_keys (int)    — total keys loaded
+        exhausted (int)     — how many keys are currently cooldown-exhausted
+        model (str)         — current primary model
+        status_text (str)   — human-readable status for display
+        status_color (str)  — "green", "yellow", or "red"
+    """
+    total = len(_key_manager._keys)
+    now = time.time()
+    exhausted = sum(
+        1 for k, until in _key_manager._exhausted_until.items() if until > now
+    )
+    active = _key_manager.current_key()
+    online = _check_internet()
+
+    if not total:
+        return {
+            "has_key": False, "online": online,
+            "active_key": "—", "total_keys": 0, "exhausted": 0,
+            "model": _MODEL_PRIORITY[0],
+            "status_text": "❌ No API Key",
+            "status_color": "red",
+        }
+
+    if not active:
+        return {
+            "has_key": True, "online": online,
+            "active_key": "—", "total_keys": total, "exhausted": exhausted,
+            "model": _MODEL_PRIORITY[0],
+            "status_text": "⏳ All keys cooling down",
+            "status_color": "yellow",
+        }
+
+    if not online:
+        return {
+            "has_key": True, "online": False,
+            "active_key": active[-6:], "total_keys": total, "exhausted": exhausted,
+            "model": _MODEL_PRIORITY[0],
+            "status_text": "📵 Offline",
+            "status_color": "yellow",
+        }
+
+    color = "green" if exhausted < total else "yellow"
+    available = total - exhausted
+    if total > 1 and available > 0:
+        status_text = f"🔁 Auto-switching ({available}/{total} keys)"
+    else:
+        status_text = f"✅ API Live ({available}/{total} keys)"
+    return {
+        "has_key": True, "online": True,
+        "active_key": active[-6:], "total_keys": total, "exhausted": exhausted,
+        "model": _MODEL_PRIORITY[0],
+        "status_text": status_text,
+        "status_color": color,
+    }

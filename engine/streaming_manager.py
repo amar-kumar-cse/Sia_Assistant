@@ -8,7 +8,10 @@ import threading
 import queue
 import time
 import re
+import logging
 from typing import Generator, Callable, Optional
+
+logger = logging.getLogger(__name__)
 
 class StreamingManager:
     """
@@ -35,36 +38,90 @@ class StreamingManager:
         self.min_chunk_length = 20  # Minimum characters before speaking
         self.sentence_endings = r'[.!?।]'  # Include Hindi sentence ending
         
-    def process_stream(self, text_generator: Generator, voice_callback: Callable):
+        # ✅ FIX #6: Track threads for proper cleanup
+        self._text_thread: Optional[threading.Thread] = None
+        self._voice_thread: Optional[threading.Thread] = None
+        
+    def process_stream(self, text_generator: Generator, voice_callback: Callable, timeout_seconds: int = 120) -> bool:
         """
-        Main streaming pipeline coordinator.
+        ✅ FIX #6: Main streaming pipeline coordinator with proper timeout and cleanup.
         
         Args:
             text_generator: Generator yielding text chunks from Gemini
             voice_callback: Function to call with complete sentences for TTS
+            timeout_seconds: Max time to allow for streaming
+            
+        Returns:
+            True if completed successfully, False if timeout/error
         """
         self.is_streaming = True
         self.should_stop = False
+        success = False
         
-        # Start parallel threads
-        text_thread = threading.Thread(
-            target=self._text_collector_thread,
-            args=(text_generator,),
-            daemon=True
-        )
+        try:
+            # ✅ FIX #6: Create non-daemon threads for proper cleanup
+            self._text_thread = threading.Thread(
+                target=self._text_collector_thread,
+                args=(text_generator,),
+                name="StreamTextCollector",
+                daemon=False  # ✅ Non-daemon
+            )
+            
+            self._voice_thread = threading.Thread(
+                target=self._voice_synthesis_thread,
+                args=(voice_callback,),
+                name="StreamVoiceSynthesis",
+                daemon=False  # ✅ Non-daemon
+            )
+            
+            self._text_thread.start()
+            self._voice_thread.start()
+            
+            # ✅ FIX #6: Join with timeout
+            logger.info(f"Starting stream processing (timeout={timeout_seconds}s)")
+            
+            self._text_thread.join(timeout=timeout_seconds)
+            self._voice_thread.join(timeout=timeout_seconds)
+            
+            # ✅ FIX #6: Check if threads completed
+            if self._text_thread.is_alive() or self._voice_thread.is_alive():
+                logger.error("Stream threads did not complete within timeout")
+                self.should_stop = True
+                
+                # ✅ FIX #6: Force cleanup
+                self._text_thread.join(timeout=5)
+                self._voice_thread.join(timeout=5)
+                
+                if self._text_thread.is_alive() or self._voice_thread.is_alive():
+                    logger.error("Threads still alive after cleanup - possible deadlock")
+                    return False
+            else:
+                success = True
+                logger.info("Stream processing completed successfully")
+            
+        except Exception as e:
+            logger.error(f"Stream processing error: {e}", exc_info=True)
+            self.should_stop = True
         
-        voice_thread = threading.Thread(
-            target=self._voice_synthesis_thread,
-            args=(voice_callback,),
-            daemon=True
-        )
+        finally:
+            self.is_streaming = False
+            # ✅ FIX #6: Clear references
+            self._text_thread = None
+            self._voice_thread = None
+            
+            return success
+    
+    def stop_streaming(self) -> None:
+        """✅ FIX #6: Force stop streaming with cleanup."""
+        logger.info("Stopping stream processing")
+        self.should_stop = True
         
-        text_thread.start()
-        voice_thread.start()
+        # ✅ FIX #6: Wait for threads to finish
+        if self._text_thread and self._text_thread.is_alive():
+            self._text_thread.join(timeout=5)
         
-        # Wait for completion
-        text_thread.join()
-        voice_thread.join()
+        if self._voice_thread and self._voice_thread.is_alive():
+            self._voice_thread.join(timeout=5)
         
         self.is_streaming = False
         

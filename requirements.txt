@@ -10,6 +10,7 @@ SpeechRecognition
 pyaudio
 PyQt5
 PyQt5-tools
+pywin32
 webrtcvad  # Optional: For advanced Voice Activity Detection
 keyboard  # Global hotkeys (requires admin on Windows)
 

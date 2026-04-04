@@ -3,6 +3,7 @@ import os
 import sqlite3
 import sys
 import time
+import copy  # ✅ FIX #1: For deepcopy operations
 from datetime import datetime
 from typing import Optional, Dict, Any, List
 
@@ -51,11 +52,21 @@ DEFAULT_MEMORY = {
 _memory_cache = None
 _context_cache = None
 _cache_timestamp = None
+_cache_lock = threading.Lock()  # ✅ FIX #1: Thread-safe cache lock
 
 def _get_db() -> sqlite3.Connection:
-    """Returns an active SQLite connection."""
-    conn = sqlite3.connect(DB_PATH)
+    """Returns an active SQLite connection with proper settings."""
+    # ✅ FIX #2: Add timeout, WAL mode, and multi-thread safety
+    conn = sqlite3.connect(
+        DB_PATH,
+        timeout=5.0,  # Wait max 5s for database lock
+        check_same_thread=False  # Allow use across threads with proper locking
+    )
     conn.row_factory = sqlite3.Row
+    # ✅ Enable WAL mode for better concurrent access
+    conn.execute("PRAGMA journal_mode=WAL")
+    # ✅ Faster writes with acceptable reliability
+    conn.execute("PRAGMA synchronous=NORMAL")
     return conn
 
 def _init_db() -> None:
@@ -76,7 +87,7 @@ def _init_db() -> None:
                 entry TEXT
             )
         ''')
-        # NEW: Dynamic user facts learned from conversation
+        # Dynamic user facts learned from conversation
         conn.execute('''
             CREATE TABLE IF NOT EXISTS user_facts (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -84,7 +95,7 @@ def _init_db() -> None:
                 timestamp TEXT
             )
         ''')
-        # NEW: To-Do list for morning briefing etc.
+        # To-Do list
         conn.execute('''
             CREATE TABLE IF NOT EXISTS todos (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -92,6 +103,15 @@ def _init_db() -> None:
                 status TEXT DEFAULT "pending",
                 created_at TEXT,
                 completed_at TEXT
+            )
+        ''')
+        # Persistent chat history (cross-session memory)
+        conn.execute('''
+            CREATE TABLE IF NOT EXISTS chat_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                role TEXT NOT NULL,
+                message TEXT NOT NULL,
+                timestamp TEXT NOT NULL
             )
         ''')
         
@@ -112,12 +132,14 @@ _init_db()
 
 def load_memory() -> Dict[str, Any]:
     """Loads memory from SQLite with in-memory caching for instant access."""
-    global _memory_cache, _cache_timestamp
+    global _memory_cache, _cache_timestamp, _cache_lock
     
-    # Return cached version if available and recent (< 5 seconds old)
-    if _memory_cache is not None and _cache_timestamp:
-        if time.time() - _cache_timestamp < 5:
-            return _memory_cache.copy()
+    # ✅ FIX #1: Return cached version with proper locking
+    with _cache_lock:
+        if _memory_cache is not None and _cache_timestamp:
+            if time.time() - _cache_timestamp < 5:
+                import copy
+                return copy.deepcopy(_memory_cache)  # ✅ Use deepcopy instead of shallow copy
             
     memory_dict = {cat: {} for cat in DEFAULT_MEMORY.keys() if cat != "memory_log"}
     memory_dict["memory_log"] = []
@@ -147,17 +169,20 @@ def load_memory() -> Dict[str, Any]:
                     if cat not in memory_dict: memory_dict[cat] = {}
                     memory_dict[cat][k] = v
                     
-        _memory_cache = memory_dict.copy()
-        _cache_timestamp = time.time()
+        # ✅ FIX #1: Update cache with lock
+        with _cache_lock:
+            _memory_cache = memory_dict.copy()
+            _cache_timestamp = time.time()
         
-        return memory_dict
+        import copy
+        return copy.deepcopy(memory_dict)  # ✅ Return deep copy for safety
     except Exception as e:
         print(f"Error loading SQLite memory: {e}")
         return DEFAULT_MEMORY.copy()
 
 def save_memory(memory_data: Dict[str, Any]) -> bool:
     """Saves memory back to SQLite and updates cache."""
-    global _memory_cache, _context_cache, _cache_timestamp
+    global _memory_cache, _context_cache, _cache_timestamp, _cache_lock
     
     try:
         with _db_lock, _get_db() as conn:
@@ -175,10 +200,11 @@ def save_memory(memory_data: Dict[str, Any]) -> bool:
                         (cat, k, json.dumps(v))
                     )
                     
-        # Update cache
-        _memory_cache = memory_data.copy()
-        _context_cache = None  # Invalidate context cache
-        _cache_timestamp = time.time()
+        # ✅ FIX #1: Update cache with lock
+        with _cache_lock:
+            _memory_cache = memory_data.copy()
+            _context_cache = None  # Invalidate context cache
+            _cache_timestamp = time.time()
         
         return True
     except Exception as e:
@@ -465,3 +491,64 @@ def get_morning_briefing_data() -> Dict[str, Any]:
         "recent_facts": facts,
         "todo_count": len(todos)
     }
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  PERSISTENT CHAT HISTORY (Cross-session contextual memory)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+def save_chat_history(history: list, max_turns: int = 20) -> bool:
+    """
+    Persist the last `max_turns` conversation turns to SQLite.
+    `history` is a list of (role, message) tuples as used in brain.py.
+    Called after every AI response so memory survives a restart.
+    """
+    try:
+        # Keep only the most recent turns to avoid DB bloat
+        recent = history[-max_turns * 2:]   # each turn = 2 entries (user + sia)
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+        with _db_lock, _get_db() as conn:
+            # Clear old history and write fresh (small table, full replace is fine)
+            conn.execute("DELETE FROM chat_history")
+            for role, message in recent:
+                conn.execute(
+                    "INSERT INTO chat_history (role, message, timestamp) VALUES (?, ?, ?)",
+                    (role, message, timestamp)
+                )
+        return True
+    except Exception as e:
+        print(f"[Sia Memory] Error saving chat history: {e}")
+        return False
+
+
+def load_chat_history(n_turns: int = 10) -> list:
+    """
+    Load the last `n_turns` conversation turns from SQLite.
+    Returns a list of (role, message) tuples — same format as brain.py chat_history.
+    Call this at brain.py startup to restore short-term context.
+    """
+    try:
+        with _db_lock, _get_db() as conn:
+            # n_turns * 2 because each exchange = 1 user + 1 sia message
+            rows = conn.execute(
+                "SELECT role, message FROM chat_history ORDER BY id ASC"
+            ).fetchall()
+        result = [(row["role"], row["message"]) for row in rows]
+        # Return only the last n_turns exchanges
+        return result[-(n_turns * 2):]
+    except Exception as e:
+        print(f"[Sia Memory] Error loading chat history: {e}")
+        return []
+
+
+def clear_chat_history_db() -> bool:
+    """Permanently delete all stored conversation history."""
+    try:
+        with _db_lock, _get_db() as conn:
+            conn.execute("DELETE FROM chat_history")
+        print("[Sia Memory] Chat history cleared from DB.")
+        return True
+    except Exception as e:
+        print(f"[Sia Memory] Error clearing chat history: {e}")
+        return False

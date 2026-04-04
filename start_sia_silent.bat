@@ -10,7 +10,7 @@ if not exist ".venv\" (
     exit /b 1
 )
 
-REM Start Sia 2.0 minimized (no window)
-start /min "" .venv\Scripts\pythonw.exe main_sia_2.py --startup
+REM Start Sia desktop app minimized (no console window)
+start /min "" .venv\Scripts\pythonw.exe sia_desktop.py --startup
 
 exit

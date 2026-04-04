@@ -10,10 +10,7 @@ import os
 import subprocess
 import platform
 from . import memory
-import psutil
-import ctypes
 import urllib.parse
-import wikipedia
 from .logger import get_logger
 from typing import Optional, Dict, List, Any
 from .action_handler import action_handler
@@ -117,11 +114,14 @@ def open_terminal() -> str:
 def check_battery() -> str:
     """Check battery percentage."""
     try:
+        import psutil
         battery = psutil.sensors_battery()
         if battery:
             plugged = "Plugged In" if battery.power_plugged else "Not Plugged"
             return f"✅ Battery is at {battery.percent}% ({plugged})"
         return "❌ Battery information not available"
+    except ImportError:
+        return "❌ psutil not installed. Run: pip install psutil"
     except Exception as e:
         logger.error(f"Failed to get battery info: {e}")
         return "❌ Failed to get battery info"
@@ -130,6 +130,7 @@ def lock_system() -> str:
     """Lock the computer."""
     try:
         if platform.system() == 'Windows':
+            import ctypes
             ctypes.windll.user32.LockWorkStation()
         elif platform.system() == 'Darwin':
             subprocess.run(['pmset', 'displaysleepnow'])
@@ -149,13 +150,18 @@ def play_music(query: str) -> str:
 def search_wikipedia(query: str) -> str:
     """Search Wikipedia for a query."""
     try:
+        import wikipedia
         summary = wikipedia.summary(query, sentences=2)
         return f"📚 Wikipedia says: {summary}"
-    except wikipedia.exceptions.DisambiguationError:
-        return f"⚠️ There are multiple results for {query}. Please be more specific."
-    except wikipedia.exceptions.PageError:
-        return f"❌ Could not find Wikipedia page for {query}."
+    except ImportError:
+        return "❌ wikipedia not installed. Run: pip install wikipedia"
     except Exception as e:
+        # Handle DisambiguationError and PageError generically
+        err_name = type(e).__name__
+        if 'Disambiguation' in err_name:
+            return f"⚠️ There are multiple results for {query}. Please be more specific."
+        elif 'PageError' in err_name:
+            return f"❌ Could not find Wikipedia page for {query}."
         return f"❌ Error searching Wikipedia: {e}"
 
 

@@ -29,8 +29,8 @@ def listen_for_wake_word(wake_word="sia", source=None, max_retries=3):
         max_retries: Number of retries on failure (default: 3)
     """
     recognizer = sr.Recognizer()
-    # ✅ CRITICAL FIX: Lowered energy threshold for better sensitivity
-    recognizer.energy_threshold = 150  # Lowered from 300 to capture quiet sounds
+    # ✅ CRITICAL FIX: Restored standard threshold to prevent noise-loops
+    recognizer.energy_threshold = 300  # Default 300 is best for general use
     recognizer.pause_threshold = 0.6  # Slightly longer pause
     recognizer.dynamic_energy_threshold = True
     recognizer.dynamic_energy_adjustment_damping = 0.10  # More responsive
@@ -77,25 +77,37 @@ def _listen_loop(recognizer, source, wake_word, timeout_seconds=2, phrase_limit=
                 # but Google is fine for now.
                 text = recognizer.recognize_google(audio).lower()
                 print(f"heard: {text}")
-                if wake_word in text:
+                wake_aliases = [wake_word.lower(), "siya", "see ya", "shia", "sya", "cia", "shea"]
+                if any(alias in text for alias in wake_aliases):
                     print("⚡ Wake word detected!")
                     return True
             except sr.UnknownValueError:
-                pass
-            except sr.RequestError:
-                pass
+                # ✅ FIX #3: Increment error counter
+                consecutive_errors += 1
+                logger.debug(f"Unclear audio, retry {consecutive_errors}/{max_consecutive_errors}")
+            except sr.RequestError as req_e:
+                # ✅ FIX #3: Increment error counter
+                consecutive_errors += 1
+                logger.warning(f"Google API error: {req_e}, retry {consecutive_errors}/{max_consecutive_errors}")
         except sr.WaitTimeoutError:
-            pass
+            # ✅ FIX #3: THIS WAS THE BUG - timeout was never counted!
+            consecutive_errors += 1
+            logger.debug(f"Timeout waiting for speech, retry {consecutive_errors}/{max_consecutive_errors}")
         except Exception as e:
-            print(f"⚠️ Wake word error: {e}")
-            pass
+            # ✅ FIX #3: Count all other errors too
+            consecutive_errors += 1
+            logger.error(f"Wake word loop error: {e}, retry {consecutive_errors}/{max_consecutive_errors}")
+    
+    # ✅ FIX #3: Exit loop gracefully instead of infinite loop
+    logger.warning(f"Max consecutive errors ({max_consecutive_errors}) reached in wake word detection")
+    return False
 
-def listen(use_whisper=True, max_retries=MAX_RECOGNITION_RETRIES):
+def listen(use_whisper=False, max_retries=MAX_RECOGNITION_RETRIES):
     """
     Listens to the microphone with enhanced error handling and retry logic.
     
     Args:
-        use_whisper (bool): Default True to use local Whisper STT
+        use_whisper (bool): Default False (Google STT is faster)
         max_retries (int): Number of retries on failure
         
     Returns:
@@ -103,8 +115,8 @@ def listen(use_whisper=True, max_retries=MAX_RECOGNITION_RETRIES):
     """
     recognizer = sr.Recognizer()
     
-    # ✅ ENHANCED: Optimized microphone settings for sensitivity
-    recognizer.energy_threshold = 50  # Ultra-sensitive
+    # ✅ ENHANCED: Optimized microphone settings for sensitivity but rejecting raw noise
+    recognizer.energy_threshold = 300  # Standard (300) to prevent looping on PC fan noise
     recognizer.dynamic_energy_threshold = True
     recognizer.dynamic_energy_adjustment_damping = 0.05
     recognizer.pause_threshold = 0.5
@@ -160,8 +172,17 @@ def listen(use_whisper=True, max_retries=MAX_RECOGNITION_RETRIES):
                 continue
             return None
         except sr.RequestError as e:
-            logger.error(f"❌ Recognition service error (attempt {attempt + 1}/{max_retries}): {e}")
-            print(f"❌ Recognition error: {e}")
+            err_str = str(e).lower()
+            if "quota" in err_str or "rate" in err_str or "429" in err_str:
+                logger.error(f"⚠️  Google STT quota exhausted (attempt {attempt + 1}): {e}")
+                print("⚠️  Google STT limit hit — will retry after short wait")
+                time.sleep(5)
+            elif "connection" in err_str or "network" in err_str:
+                logger.error(f"❌ Network error for STT (attempt {attempt + 1}): {e}")
+                print("❌ Internet connection problem — check your Wi-Fi")
+            else:
+                logger.error(f"❌ STT recognition service error (attempt {attempt + 1}): {e}")
+                print(f"❌ Recognition error: {e}")
             if attempt < max_retries - 1:
                 time.sleep(RETRY_DELAY)
                 continue
@@ -193,7 +214,7 @@ def listen_with_vad():
     vad = webrtcvad.Vad(2)  # Aggressiveness 2 (0-3, higher = more aggressive)
     
     # Even more sensitive settings for VAD mode
-    recognizer.energy_threshold = 150  # Lowered from 300
+    recognizer.energy_threshold = 300  # Using standard to avoid false VAD triggers
     recognizer.pause_threshold = 0.5  # Slightly longer to capture complete phrases
     
     try:

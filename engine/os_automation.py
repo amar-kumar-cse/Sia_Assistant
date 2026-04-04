@@ -14,7 +14,7 @@ import time
 import tempfile
 import webbrowser
 import urllib.parse
-from typing import Optional
+from typing import Optional, Union
 from .logger import get_logger
 
 logger = get_logger(__name__)
@@ -140,7 +140,7 @@ def _is_command_allowed(command: str) -> bool:
     return cmd_lower in ALLOWED_COMMANDS or any(allowed in cmd_lower for allowed in ALLOWED_COMMANDS)
 
 
-def set_volume(level: int | str) -> str:
+def set_volume(level: Union[int, str]) -> str:
     """
     Set system volume (0-100).
     Uses nircmd as fallback if pycaw isn't available.
