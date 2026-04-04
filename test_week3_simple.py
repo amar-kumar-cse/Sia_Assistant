@@ -10,7 +10,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).parent))
 def test_requirements_pinned():
     print("\nTEST #1: REQUIREMENTS VERSIONS PINNED")
     req_file = pathlib.Path(__file__).parent / "requirements.txt"
-    content = req_file.read_text()
+    content = req_file.read_text(encoding="utf-8", errors="ignore")
     unpinned = []
     for line in content.split("\n"):
         line = line.strip()

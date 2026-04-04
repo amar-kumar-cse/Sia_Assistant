@@ -14,13 +14,20 @@ import requests
 import json
 import socket
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from . import memory
 from dotenv import load_dotenv
 from .logger import get_logger
-from .performance import monitor_performance, initialize_optimization, shutdown_optimization
+from .performance import monitor_performance, initialize_optimization, shutdown_optimization, memory_manager
 from typing import Optional, List, Dict, Any, Generator
 
+try:
+    from analytics import telemetry
+except ImportError:
+    telemetry = None
+
 logger = get_logger(__name__)
+_response_cache = memory_manager.memory_cache
 
 # ── Gemini SDK Detection ──────────────────────────────────────────────────────
 try:
@@ -523,6 +530,61 @@ chat_history: List[tuple] = memory.load_chat_history(n_turns=10)
 #  MAIN THINK FUNCTION
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
+def _normalize_cache_key(user_input: str) -> str:
+    """Build a stable cache key for repeated questions."""
+    return f"think::{user_input.strip().lower()}"
+
+
+def _build_contexts(user_input: str) -> tuple[str, str]:
+    """Resolve knowledge-base and web context in parallel."""
+    kb_context = ""
+    web_context = ""
+
+    def _knowledge_task() -> str:
+        try:
+            from . import knowledge_base
+            return knowledge_base.search_knowledge(user_input, top_k=2)
+        except Exception as e:
+            logger.warning("KB search skipped: %s", e)
+            return ""
+
+    def _web_task() -> str:
+        try:
+            if not needs_web_search(user_input) or not _check_internet():
+                return ""
+
+            from . import web_search
+            text_lower = user_input.lower()
+            if any(kw in text_lower for kw in ["news", "khabar", "taaza", "trending"]):
+                return web_search.search_for_brain(user_input, context_type="news")
+            if any(kw in text_lower for kw in ["weather", "mausam"]):
+                return web_search.search_for_brain("Roorkee", context_type="weather")
+            if any(kw in text_lower for kw in ["code", "error", "function", "library", "python", "java"]):
+                return web_search.search_for_brain(user_input, context_type="coding")
+            return web_search.search_for_brain(user_input, context_type="general")
+        except Exception as e:
+            logger.warning("Web search skipped: %s", e)
+            return ""
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        futures = {
+            executor.submit(_knowledge_task): "kb",
+            executor.submit(_web_task): "web",
+        }
+        for future in as_completed(futures):
+            label = futures[future]
+            try:
+                result = future.result()
+            except Exception as e:
+                logger.warning("Context task %s failed: %s", label, e)
+                result = ""
+            if label == "kb":
+                kb_context = result
+            else:
+                web_context = result
+
+    return kb_context, web_context
+
 def think(user_input: str) -> str:
     """
     Process user input and return Sia's response.
@@ -555,6 +617,10 @@ def think(user_input: str) -> str:
         - Automatically falls back through multiple providers if one fails
     """
     global chat_history
+    start_time = time.time()
+
+    if telemetry:
+        telemetry.record_event("think_request")
 
     # 1. Input validation
     try:
@@ -565,11 +631,27 @@ def think(user_input: str) -> str:
     except Exception as e:
         logger.error("Input validation failed: %s", e)
 
+    cache_key = _normalize_cache_key(user_input)
+    cached_reply = _response_cache.get(cache_key)
+    if cached_reply is not None:
+        logger.info("Smart cache hit for input: %s", user_input[:60])
+        if telemetry:
+            telemetry.record_event("think_cache_hit")
+        return cached_reply
+
+    if telemetry:
+        telemetry.record_event("think_cache_miss")
+
     # 2. Code repair shortcut
     try:
         from . import code_repair
         if code_repair.is_code_repair_request(user_input):
-            return code_repair.repair_code(user_input)
+            reply = code_repair.repair_code(user_input)
+            _response_cache.put(cache_key, reply)
+            if telemetry:
+                telemetry.record_event("think_code_repair")
+                telemetry.record_timing("think", time.time() - start_time, cached=False, success=True)
+            return reply
     except Exception as e:
         logger.warning("Code repair skipped: %s", e)
 
@@ -585,30 +667,8 @@ def think(user_input: str) -> str:
     elif user_mood == "HAPPY":
         mood_instruction = "\n😊 USER MOOD: Happy. Be cheerful!\n"
 
-    # 4. RAG Knowledge Base
-    kb_context = ""
-    try:
-        from . import knowledge_base
-        kb_context = knowledge_base.search_knowledge(user_input, top_k=2)
-    except Exception as e:
-        logger.warning("KB search skipped: %s", e)
-
-    # 5. Web Search (if needed AND internet available)
-    web_context = ""
-    if needs_web_search(user_input) and _check_internet():
-        try:
-            from . import web_search
-            text_lower = user_input.lower()
-            if any(kw in text_lower for kw in ["news", "khabar", "taaza", "trending"]):
-                web_context = web_search.search_for_brain(user_input, context_type="news")
-            elif any(kw in text_lower for kw in ["weather", "mausam"]):
-                web_context = web_search.search_for_brain("Roorkee", context_type="weather")
-            elif any(kw in text_lower for kw in ["code", "error", "function", "library", "python", "java"]):
-                web_context = web_search.search_for_brain(user_input, context_type="coding")
-            else:
-                web_context = web_search.search_for_brain(user_input, context_type="general")
-        except Exception as e:
-            logger.warning("Web search skipped: %s", e)
+    # 4. RAG Knowledge Base + Web Search in parallel
+    kb_context, web_context = _build_contexts(user_input)
 
     # 6. Build prompt
     persona = get_advanced_persona()
@@ -646,8 +706,11 @@ Sia:"""
         if len(chat_history) > 100:
             chat_history = chat_history[-100:]
         memory.save_chat_history(chat_history)
+        _response_cache.put(cache_key, reply)
 
         _extract_and_save_facts(user_input)
+        if telemetry:
+            telemetry.record_timing("think", time.time() - start_time, cached=False, success=True)
         return reply
 
     except Exception as gemini_err:
@@ -661,6 +724,9 @@ Sia:"""
             if len(chat_history) > 100:
                 chat_history = chat_history[-100:]
             memory.save_chat_history(chat_history)
+            _response_cache.put(cache_key, ollama_reply)
+            if telemetry:
+                telemetry.record_timing("think", time.time() - start_time, cached=False, success=True)
             return ollama_reply
 
         # 9. Smart offline response
@@ -668,6 +734,8 @@ Sia:"""
         safe_key = _key_manager.current_key() or ""
         safe_err = str(gemini_err).replace(safe_key, "[REDACTED]")
         logger.error("Full error (sanitized): %s", safe_err)
+        if telemetry:
+            telemetry.record_timing("think", time.time() - start_time, cached=False, success=False)
         return _get_smart_offline_response(str(gemini_err))
 
 
