@@ -675,33 +675,58 @@ def think_streaming(user_input: str) -> Generator[str, None, None]:
 🚀 ULTRA-FAST MODE: 1-2 sentences only!
 Sia:"""
 
+    accumulated_text = ""  # ✅ Buffer for error recovery
+    chunk_count = 0
+    streaming_failed = False
+    
     try:
         response = _generate_with_fallback(full_prompt, stream=True)
         reply_chunks = []
         for chunk in response:
             try:
+                chunk_count += 1
                 chunk_text = getattr(chunk, "text", "")
                 if chunk_text:
                     reply_chunks.append(chunk_text)
+                    accumulated_text += chunk_text
                     yield chunk_text
             except Exception as chunk_err:
-                logger.warning("Streaming chunk error: %s", chunk_err)
+                logger.warning("Streaming chunk error at chunk #%d: %s", chunk_count, chunk_err)
+                # ✅ Continue if we have accumulated text
+                if accumulated_text:
+                    yield " [⚠️ Streaming interrupted but recovered] "
+                else:
+                    streaming_failed = True
+                    break
 
         full_reply = "".join(reply_chunks)
-        chat_history.append(("Amar", user_input))
-        chat_history.append(("Sia", full_reply.strip()))
-        if len(chat_history) > 100:
-            chat_history = chat_history[-100:]
-        memory.save_chat_history(chat_history)
+        
+        # ✅ Only save if we got meaningful content
+        if full_reply or accumulated_text:
+            chat_history.append(("Amar", user_input))
+            chat_history.append(("Sia", (full_reply or accumulated_text).strip()))
+            if len(chat_history) > 100:
+                chat_history = chat_history[-100:]
+            memory.save_chat_history(chat_history)
 
     except Exception as e:
-        # Ollama streaming fallback
+        # ✅ If we have accumulated text from Gemini, use it
+        if accumulated_text:
+            logger.warning("Gemini stream interrupted after %d chars, using accumulated text", len(accumulated_text))
+            full_reply = accumulated_text
+            chat_history.append(("Amar", user_input))
+            chat_history.append(("Sia", full_reply.strip()))
+            memory.save_chat_history(chat_history)
+            return
+        
+        # Otherwise fall back to Ollama streaming
         reply_chunks = []
         got_chunk = False
         for chunk in _think_ollama_streaming_fallback(full_prompt):
             if chunk:
                 got_chunk = True
                 reply_chunks.append(chunk)
+                accumulated_text += chunk
                 yield chunk
 
         if not got_chunk:

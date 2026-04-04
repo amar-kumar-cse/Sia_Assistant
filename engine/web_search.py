@@ -6,25 +6,51 @@ Uses DuckDuckGo (no API key required!) with Google fallback.
 
 import os
 import re
+import threading
 from datetime import datetime
+from typing import Optional
 
 
-def search_web(query, num_results=3):
+def search_web(query, num_results=3, timeout_seconds: int = 5) -> str:
     """
     Search the web using DuckDuckGo (no API key needed).
     
     Args:
         query: Search query string
         num_results: Number of results to return
+        timeout_seconds: Maximum time to wait for search (default 5)
     
     Returns:
-        Formatted search results string
+        Formatted search results string or error message
     """
     try:
         from duckduckgo_search import DDGS
         
-        with DDGS() as ddgs:
-            results = list(ddgs.text(query, max_results=num_results))
+        # ✅ Set timeout using threading for Windows compatibility
+        results = None
+        error_msg = None
+        
+        def _search_with_ddgs():
+            nonlocal results, error_msg
+            try:
+                with DDGS(timeout=timeout_seconds) as ddgs:
+                    results = list(ddgs.text(query, max_results=num_results))
+            except Exception as e:
+                error_msg = str(e)
+        
+        # ✅ Run search in thread with timeout
+        search_thread = threading.Thread(target=_search_with_ddgs, daemon=True)
+        search_thread.start()
+        search_thread.join(timeout=timeout_seconds)
+        
+        if search_thread.is_alive():
+            return f"⏱️ Web search ke liye timeout ho gaya ({timeout_seconds}s). Internet dhire hai."
+        
+        if error_msg:
+            raise Exception(error_msg)
+        
+        if results is None:
+            results = []
         
         if not results:
             return f"❌ '{query}' ke liye kuch nahi mila internet pe."

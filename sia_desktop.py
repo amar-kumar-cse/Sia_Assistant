@@ -128,7 +128,15 @@ class WakeWordThread(QThread):
         self.paused = False
 
     def stop(self):
+        """Gracefully stop the wake word detection thread."""
         self.running = False
+        self.paused = False  # ✅ Resume first so it can exit from listen()
+        self.wait(5000)  # ✅ Wait up to 5 seconds for thread to finish
+        
+        if self.isRunning():
+            logger.warning("Wake word thread did not stop gracefully - forcing termination")
+            self.terminate()  # Force kill if needed
+            self.wait(2000)  # Wait 2 more seconds after terminate
 
 
 class ListenThread(QThread):

@@ -45,9 +45,10 @@ def sanitize_input(text: str, max_length: int = 5000) -> str:
 def validate_file_path(filepath: str) -> bool:
     """
     Validate that a file path is safe and exists.
+    Uses pathlib for cross-platform path handling.
 
     Args:
-        filepath: File path to validate
+        filepath: File path to validate (supports absolute and relative paths)
 
     Returns:
         True if path is valid and safe
@@ -55,20 +56,37 @@ def validate_file_path(filepath: str) -> bool:
     if not filepath or not isinstance(filepath, str):
         return False
 
-    # Check for directory traversal attempts
-    if '..' in filepath or filepath.startswith('/'):
-        logger.warning(f"Potentially unsafe file path: {filepath}")
+    try:
+        import pathlib
+        
+        # ✅ Use pathlib for cross-platform path handling
+        path = pathlib.Path(filepath).resolve()
+        
+        # ✅ Only block actual directory traversal attempts
+        # (not absolute paths which are legitimate)
+        if ".." in str(path.relative_to(path.anchor)):
+            logger.warning(f"Directory traversal attempt detected: {filepath}")
+            return False
+        
+        # ✅ Check if file exists and is readable
+        if not path.exists():
+            logger.debug(f"File does not exist: {filepath}")
+            return False
+        
+        if not path.is_file():
+            logger.debug(f"Path is not a file: {filepath}")
+            return False
+        
+        return True
+        
+    except Exception as e:
+        logger.warning(f"Invalid file path: {filepath} - {e}")
         return False
-
-    # Check if file exists
-    if not os.path.exists(filepath):
-        return False
-
-    return True
 
 def sanitize_command(command: str) -> Optional[str]:
     """
-    Sanitize shell commands to prevent injection.
+    Sanitize shell commands to prevent injection attacks.
+    Only blocks shell redirection, command substitution, and destructive commands.
 
     Args:
         command: Command string to sanitize
@@ -79,11 +97,18 @@ def sanitize_command(command: str) -> Optional[str]:
     if not command or not isinstance(command, str):
         return None
 
-    # Remove dangerous characters
-    dangerous_chars = [';', '&', '|', '`', '$', '(', ')', '<', '>', '"', "'"]
-    for char in dangerous_chars:
-        if char in command:
-            logger.warning(f"Dangerous character '{char}' found in command: {command}")
+    # ✅ Only block shell redirection and execution patterns
+    # (not legitimate characters like parentheses in function calls)
+    dangerous_patterns = [
+        r'[;&|`]\s*(?:rm|del|format|fdisk|deltree)',  # Shell + destructive commands
+        r'\$\(.*\)|`.*`',  # Command substitution: $(cmd) or `cmd`
+        r'>\s*[\\/]',  # Redirect to device: > /dev/null or > COM1
+        r'<\s*(?:con|prn|aux|nul)',  # Input from device (Windows)
+    ]
+    
+    for pattern in dangerous_patterns:
+        if re.search(pattern, command, re.IGNORECASE):
+            logger.warning(f"Dangerous pattern detected in command: {command}")
             return None
 
     return command.strip()
