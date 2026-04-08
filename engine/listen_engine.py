@@ -1,7 +1,9 @@
 import speech_recognition as sr
 import sys
 import time
-from typing import Optional
+import audioop
+import threading
+from typing import Optional, Callable
 import logging
 
 # Setup logging
@@ -17,7 +19,115 @@ except AttributeError:
 # ✅ ENHANCED: Retry configuration for robustness
 MAX_RECOGNITION_RETRIES = 3
 RETRY_DELAY = 0.5  # seconds
-    
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  VOICE INTERRUPT MONITOR
+#  Watches mic continuously while Sia speaks.
+#  If user speaks, Sia shuts up instantly — like a real convo.
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+class VoiceInterruptMonitor:
+    """
+    Background daemon thread that monitors mic volume while Sia is speaking.
+    The moment the RMS energy crosses the threshold, it fires the interrupt callback.
+
+    Usage:
+        monitor = VoiceInterruptMonitor(
+            interrupt_callback=lambda: voice_engine.stop(),
+            is_speaking_fn=voice_engine.get_speaking_state
+        )
+        monitor.start()
+        # Will silently self-stop when Sia finishes speaking.
+    """
+
+    SAMPLE_RATE    = 16000   # Hz
+    CHUNK_FRAMES   = 512     # ~32ms per chunk at 16kHz
+    RMS_THRESHOLD  = 1200    # Tune this: lower = more sensitive
+    MIN_INTERRUPT_INTERVAL = 1.5  # Seconds between interrupts
+
+    def __init__(
+        self,
+        interrupt_callback: Callable,
+        is_speaking_fn: Callable[[], bool],
+        rms_threshold: int = RMS_THRESHOLD,
+    ):
+        self.interrupt_callback = interrupt_callback
+        self.is_speaking_fn = is_speaking_fn
+        self.rms_threshold = rms_threshold
+        self._thread: Optional[threading.Thread] = None
+        self._stop_flag = threading.Event()
+        self._last_interrupt = 0.0
+
+    def start(self):
+        """Start the monitor in a daemon thread."""
+        self._stop_flag.clear()
+        self._thread = threading.Thread(target=self._run, daemon=True, name="VoiceInterruptMonitor")
+        self._thread.start()
+        logger.debug("[VAD Monitor] Started.")
+
+    def stop(self):
+        """Signal the monitor thread to stop."""
+        self._stop_flag.set()
+
+    def _run(self):
+        """Main sampling loop using PyAudio directly for low-latency access."""
+        try:
+            import pyaudio
+        except ImportError:
+            logger.warning("[VAD Monitor] pyaudio not installed — voice interruption disabled.")
+            return
+
+        pa = pyaudio.PyAudio()
+        stream = None
+        try:
+            stream = pa.open(
+                format=pyaudio.paInt16,
+                channels=1,
+                rate=self.SAMPLE_RATE,
+                input=True,
+                frames_per_buffer=self.CHUNK_FRAMES,
+            )
+            logger.debug("[VAD Monitor] Mic stream opened.")
+
+            while not self._stop_flag.is_set():
+                if not self.is_speaking_fn():
+                    # Sia not speaking — idle wait
+                    time.sleep(0.05)
+                    continue
+
+                try:
+                    raw = stream.read(self.CHUNK_FRAMES, exception_on_overflow=False)
+                    rms = audioop.rms(raw, 2)  # 2 bytes = int16
+                    if rms > self.rms_threshold:
+                        now = time.time()
+                        if now - self._last_interrupt > self.MIN_INTERRUPT_INTERVAL:
+                            self._last_interrupt = now
+                            logger.info(f"[VAD Monitor] Interrupt! RMS={rms} > {self.rms_threshold}")
+                            try:
+                                self.interrupt_callback()
+                            except Exception as cb_err:
+                                logger.warning(f"[VAD Monitor] Callback error: {cb_err}")
+                except OSError:
+                    # Mic disconnect / overflow — retry
+                    time.sleep(0.1)
+
+        except Exception as e:
+            logger.warning(f"[VAD Monitor] Stream error: {e}")
+        finally:
+            if stream:
+                try:
+                    stream.stop_stream()
+                    stream.close()
+                except Exception:
+                    pass
+            try:
+                pa.terminate()
+            except Exception:
+                pass
+            logger.debug("[VAD Monitor] Stopped.")
+
+
 def listen_for_wake_word(wake_word="sia", source=None, max_retries=3):
     """
     Continuously listens for the wake word 'Sia' with retry mechanism.

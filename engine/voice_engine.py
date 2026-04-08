@@ -9,10 +9,16 @@ import subprocess
 import hashlib
 import sys
 import threading
+import math
+import random
 from typing import Optional, Callable, Dict
 from .logger import get_logger
 
 logger = get_logger(__name__)
+
+# Track the active edge-tts subprocess so we can kill it on interrupt
+_active_subprocess = None
+_active_subprocess_lock = threading.Lock()
 
 # Get config with error handling
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -317,8 +323,6 @@ def _use_edge_tts_fallback(text, emo_settings, cache_path, callback_started, cal
     Handles slow internet, quota exhaustion, and subprocess timeouts gracefully.
     If edge-tts fails → pyttsx3 last resort.
     """
-    global is_speaking, speech_start_time, speech_duration
-
     print(f"[Sia (Edge-TTS) Fallback]: {text[:50]}...")
     logger.info("Attempting Edge-TTS for text: %s...", text[:50])
     
@@ -349,6 +353,7 @@ def _use_edge_tts_fallback(text, emo_settings, cache_path, callback_started, cal
             logger.debug("Running edge-tts: voice=%s rate=%s pitch=%s", voice, rate, pitch)
             
             # Run edge-tts with proper timeout handling
+            global _active_subprocess
             process = subprocess.Popen(
                 ["edge-tts", "--voice", voice,
                  "--rate", rate, "--pitch", pitch,
@@ -357,6 +362,8 @@ def _use_edge_tts_fallback(text, emo_settings, cache_path, callback_started, cal
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE
             )
+            with _active_subprocess_lock:
+                _active_subprocess = process
             
             try:
                 stdout, stderr = process.communicate(timeout=30)
@@ -435,15 +442,52 @@ def _use_edge_tts_fallback(text, emo_settings, cache_path, callback_started, cal
 
 
 def stop() -> None:
-    """Stops any currently playing audio."""
-    if pygame.mixer.music.get_busy():
-        pygame.mixer.music.stop()
+    """Stops any currently playing audio AND kills any pending edge-tts subprocess."""
+    global _active_subprocess
+    
+    # Kill edge-tts process if running
+    with _active_subprocess_lock:
+        if _active_subprocess and _active_subprocess.poll() is None:
+            try:
+                _active_subprocess.kill()
+                logger.info("[Voice Interrupt] edge-tts process killed.")
+            except Exception as e:
+                logger.warning(f"[Voice Interrupt] subprocess kill failed: {e}")
+        _active_subprocess = None
+    
+    # Stop Pygame mixer immediately
+    try:
+        if pygame.mixer.get_init() and pygame.mixer.music.get_busy():
+            pygame.mixer.music.stop()
+    except Exception:
+        pass
     
     _set_speaking_state(False)
+    _voice_state.set_streaming(False)
 
 def get_speaking_state() -> bool:
     """Returns current speaking state."""
     return _get_speaking_state()
+
+
+def get_audio_frequency() -> float:
+    """
+    Returns a pseudo-audio frequency/RMS value (0.0 to 1.0) 
+    representing the current voice amplitude.
+    Since pygame.mixer.music streams decoded MP3 directly to the soundcard,
+    we use a high-frequency time-based composite wave to simulate speech energy
+    when the engine is actively speaking.
+    """
+    if not _get_speaking_state():
+        return 0.0
+    
+    # Rapidly fluctuating value based on time to simulate phoneme energy
+    t = time.time() * 12.0  # syllable pacing
+    # composite wave imitating speech bursts
+    energy = (math.sin(t) + math.sin(t * 2.3) + math.sin(t * 3.7)) / 3.0
+    # Normalize 0 to 1 with some randomness
+    energy = max(0.0, energy * 0.5 + 0.5)
+    return energy * random.uniform(0.6, 1.0)
 
 def estimate_speech_duration(text: str) -> float:
     """
@@ -464,7 +508,6 @@ def speak_chunk(text_chunk: str, is_first_chunk: bool = False) -> None:
         text_chunk: Short text segment to speak
         is_first_chunk: If True, sets speaking state
     """
-    global is_speaking, is_streaming, speech_start_time
     
     if not ELEVENLABS_API_KEY or "your_elevenlabs_api_key" in ELEVENLABS_API_KEY:
         print(f"[Sia Chunk (Fallback)]: {text_chunk}")
@@ -514,8 +557,7 @@ def speak_chunk(text_chunk: str, is_first_chunk: bool = False) -> None:
             # Set speaking state on first chunk
             if is_first_chunk:
                 _set_speaking_state(True)
-                is_streaming = True
-                speech_start_time = time.time()
+                _voice_state.set_streaming(True)
             
             # Play immediately
             pygame.mixer.music.load(audio_data)
@@ -534,13 +576,8 @@ def speak_chunk(text_chunk: str, is_first_chunk: bool = False) -> None:
 
 def finish_streaming() -> None:
     """Call this when streaming is complete."""
-    global speech_duration, speech_start_time
-    
-    if speech_start_time:
-        speech_duration = time.time() - speech_start_time
-    
     _set_speaking_state(False)
-    is_streaming = False
+    _voice_state.set_streaming(False)
 
 
 def speak_async(text: str, on_start: Optional[Callable[[], None]] = None, on_finish: Optional[Callable[[], None]] = None) -> None:

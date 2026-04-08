@@ -231,6 +231,44 @@ class SiaProactiveEngine:
             )
 
     # ─────────────────────────────────────────────────────────────────
+    #  PROACTIVE SCREEN VISION (Sia initiates chat)
+    # ─────────────────────────────────────────────────────────────────
+
+    def _check_screen_context(self, current_time: float):
+        """Takes a screenshot every 5 minutes and comments if something interesting/bad happens."""
+        if not hasattr(self, "last_vision_alert"):
+            self.last_vision_alert = current_time
+
+        if current_time - self.last_vision_alert > 300: # 5 minutes
+            try:
+                from PIL import ImageGrab
+                from engine import vision_engine
+                import tempfile
+                import os
+
+                if self.is_fullscreen_app_active(): # Skip during games/movies
+                    self.last_vision_alert = current_time
+                    return
+
+                # Capture and downsample screen
+                img = ImageGrab.grab()
+                img = img.resize((img.width // 2, img.height // 2))
+                tmp_path = os.path.join(tempfile.gettempdir(), "sia_auto_vision.jpg")
+                img.save(tmp_path, format="JPEG", quality=70)
+
+                prompt = "Analyze this screen strictly. If there is a visible bug, compiler error, or something noteworthy, write 1 short casual Hinglish sentence starting a conversation about it (e.g., 'Arre hero, ye VS Code mein red line kyun?'). If it is just normal browsing, reply EXACTLY with '[NORMAL]'."
+                
+                analysis = vision_engine.analyze_image(tmp_path, prompt)
+                
+                if analysis and "[NORMAL]" not in analysis and len(analysis) > 5:
+                    self._notify(analysis, priority="Gentle")
+
+            except Exception as e:
+                print(f"[Proactive Engine]: Vision check error: {e}")
+            finally:
+                self.last_vision_alert = current_time
+
+    # ─────────────────────────────────────────────────────────────────
     #  MAIN MONITOR LOOP
     # ─────────────────────────────────────────────────────────────────
 
@@ -250,6 +288,7 @@ class SiaProactiveEngine:
                 self._check_ram(current_time)
                 self._check_temperature(current_time)
                 self._check_break(now, current_time)
+                self._check_screen_context(current_time)
 
             except Exception as e:
                 print(f"[Proactive Engine]: Unexpected error in monitor loop: {e}")

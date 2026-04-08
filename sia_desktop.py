@@ -19,17 +19,19 @@ import traceback
 import ctypes
 import platform
 import re
+import json
 
-from PyQt5.QtWidgets import (
+from PyQt5.QtWidgets import (  # type: ignore[reportMissingImports]
     QApplication, QWidget, QLabel, QPushButton,
     QSystemTrayIcon, QMenu, QAction, QLineEdit,
-    QGraphicsOpacityEffect, QFrame, QVBoxLayout, QHBoxLayout, QGridLayout
+    QGraphicsOpacityEffect, QFrame, QVBoxLayout, QHBoxLayout, QGridLayout,
+    QSlider
 )
-from PyQt5.QtCore import (
+from PyQt5.QtCore import (  # type: ignore[reportMissingImports]
     Qt, QTimer, QThread, pyqtSignal, QPropertyAnimation,
     QEasingCurve, QRect, QSize, QPoint, QPointF, QRectF
 )
-from PyQt5.QtGui import (
+from PyQt5.QtGui import (  # type: ignore[reportMissingImports]
     QPixmap, QPainter, QColor, QFont, QFontDatabase, QIcon,
     QRadialGradient, QLinearGradient, QPainterPath, QPen, QBrush,
     QFontMetrics, QCursor, QRegion
@@ -38,7 +40,7 @@ from PyQt5.QtGui import (
 # ── Backend imports ──────────────────────────────────────────
 from engine import listen_engine, brain, voice_engine, actions, memory
 from engine.automation import SiaProactiveEngine
-from engine.toast_ui import ToastNotification
+from engine.animation_engine import AnimationEngine, AvatarState, BlendFrame   # blending engine
 from engine.weather_widget import WeatherWidget
 from engine.logger import get_logger
 
@@ -50,6 +52,7 @@ app_logger = get_logger("Sia_Desktop")
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 ASSETS_DIR = os.path.join(SCRIPT_DIR, "assets")
+CACHE_DIR = os.path.join(SCRIPT_DIR, "cache")
 
 # Avatar window geometry
 AVATAR_W     = 340       # avatar widget width
@@ -74,9 +77,9 @@ GLASS_BORDER= QColor(0, 255, 204, 60)
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 class WakeWordThread(QThread):
-    """Always-listening thread for 'Sia' wake word detection."""
-    wake_word_detected = pyqtSignal()
-    status_changed     = pyqtSignal(str)
+    """Seamless continuous listening thread."""
+    text_recognized = pyqtSignal(str)
+    status_changed  = pyqtSignal(str)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -84,104 +87,38 @@ class WakeWordThread(QThread):
         self.paused  = False
 
     def run(self):
-        import speech_recognition as sr
-        recognizer = sr.Recognizer()
-        recognizer.energy_threshold        = 300
-        recognizer.pause_threshold         = 0.5
-        recognizer.dynamic_energy_threshold = True
-
+        from engine import listen_engine
         while self.running:
             if self.paused:
                 time.sleep(0.3)
                 continue
 
-            self.status_changed.emit("idle")
+            self.status_changed.emit("listening")
             try:
-                with sr.Microphone() as source:
-                    recognizer.adjust_for_ambient_noise(source, duration=0.2)
-                    while self.running and not self.paused:
-                        try:
-                            audio = recognizer.listen(source, timeout=2, phrase_time_limit=3)
-                            try:
-                                text  = recognizer.recognize_google(audio).lower()
-                                aliases = ["sia", "siya", "see ya", "shia", "sya", "cia", "shea"]
-                                if any(a in text for a in aliases):
-                                    app_logger.info(f"⚡ Wake word! (Heard: {text})")
-                                    self.status_changed.emit("detected")
-                                    self.wake_word_detected.emit()
-                                    self.paused = True
-                                    break
-                            except sr.UnknownValueError:
-                                pass
-                            except sr.RequestError:
-                                pass
-                        except sr.WaitTimeoutError:
-                            pass
-                        except Exception as e:
-                            app_logger.error(f"Wake inner error: {e}")
-                            time.sleep(1)
+                text = listen_engine.listen()
+                if text and not self.paused:
+                    self.paused = True
+                    self.text_recognized.emit(text)
             except Exception as e:
-                app_logger.error(f"Microphone error: {e}")
-                time.sleep(3)
+                time.sleep(1)
 
     def resume(self):
         self.paused = False
 
     def stop(self):
-        """Gracefully stop the wake word detection thread."""
+        """Gracefully stop."""
         self.running = False
-        self.paused = False  # ✅ Resume first so it can exit from listen()
-        self.wait(5000)  # ✅ Wait up to 5 seconds for thread to finish
-        
+        self.paused = False
+        self.wait(3000)
         if self.isRunning():
-            logger.warning("Wake word thread did not stop gracefully - forcing termination")
-            self.terminate()  # Force kill if needed
-            self.wait(2000)  # Wait 2 more seconds after terminate
+            self.terminate()
+            self.wait(1000)
 
-
-class ListenThread(QThread):
-    text_recognized  = pyqtSignal(str)
-    listening_started = pyqtSignal()
-    listening_failed  = pyqtSignal()
-
-    def run(self):
-        try:
-            self.listening_started.emit()
-            
-            # ✅ FIX #5: Get raw text
-            text = listen_engine.listen()
-            
-            if not text:  # ✅ FIX #5: Check for None/empty
-                self.listening_failed.emit()
-                return
-            
-            # ✅ FIX #5: Sanitize input
-            try:
-                from engine.validation import sanitize_input
-                sanitized_text = sanitize_input(text, max_length=500)
-            except (ImportError, ValueError) as e:
-                app_logger.error(f"Input validation failed: {e}")
-                self.listening_failed.emit()
-                return
-            
-            if not sanitized_text:  # ✅ FIX #5: Empty after sanitization
-                app_logger.warning(f"Text '{text[:50]}' was empty after sanitization")
-                self.listening_failed.emit()
-                return
-            
-            # ✅ FIX #5: Now emit safe text
-            self.text_recognized.emit(sanitized_text)
-            
-        except PermissionError:
-            app_logger.error("Microphone permission denied")
-            self.listening_failed.emit()
-        except Exception as e:
-            app_logger.error(f"Listen thread error: {e}", exc_info=True)
-            self.listening_failed.emit()
-
+import queue
 
 class ThinkThread(QThread):
     response_ready = pyqtSignal(str)
+    chunk_ready = pyqtSignal(str)
 
     def __init__(self, user_text, parent=None):
         super().__init__(parent)
@@ -190,10 +127,49 @@ class ThinkThread(QThread):
     def run(self):
         action_result = actions.perform_action(self.user_text)
         if action_result:
+            self.chunk_ready.emit(action_result)
             self.response_ready.emit(action_result)
             return
-        response = brain.think(self.user_text)
-        self.response_ready.emit(response)
+        
+        full_response = ""
+        try:
+            for chunk in brain.think_streaming(self.user_text):
+                if chunk:
+                    full_response += chunk
+                    self.chunk_ready.emit(chunk)
+        except Exception as e:
+            app_logger.error(f"Streaming error: {e}")
+            if not full_response:
+                full_response = "Mujhe kuch network issue aa raha hai."
+                self.chunk_ready.emit(full_response)
+                
+        self.response_ready.emit(full_response)
+
+class AudioStreamThread(QThread):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.q = queue.Queue()
+        self.running = True
+        self.is_first = True
+
+    def enqueue(self, text):
+        self.q.put(text)
+
+    def stop(self):
+        self.running = False
+        self.q.put("<STOP>")
+
+    def run(self):
+        while self.running:
+            try:
+                text = self.q.get(timeout=0.1)
+                if text == "<STOP>":
+                    break
+                voice_engine.speak_chunk(text, self.is_first)
+                self.is_first = False
+            except queue.Empty:
+                pass
+        voice_engine.finish_streaming()
 
 
 class SpeakThread(QThread):
@@ -211,40 +187,21 @@ class SpeakThread(QThread):
         self.speaking_finished.emit()
 
 
-class VisionThread(QThread):
+class ProactiveVisionThread(QThread):
     result_ready = pyqtSignal(str)
-
-    def __init__(self, question="Meri screen pe kya hai?", mode="screen", parent=None):
-        super().__init__(parent)
-        self.question = question
-        self.mode     = mode
 
     def run(self):
         try:
             from engine import vision_engine
-            if self.mode == "webcam":
-                result = vision_engine.analyze_webcam(self.question)
-            else:
-                result = vision_engine.analyze_screen(self.question)
+            prompt = (
+                "You are Sia, Amar's helpful and fun AI companion. "
+                "Look closely at the screen. What is Amar doing currently? (e.g. coding, watching a movie, browsing). "
+                "Give exactly a 1-sentence proactive, caring, or playful Hinglish voice line acknowledging it."
+            )
+            result = vision_engine.analyze_screen(prompt)
             self.result_ready.emit(result)
         except Exception as e:
-            self.result_ready.emit(f"[CONFUSED] Vision error: {str(e)[:50]}")
-
-
-class WebSearchThread(QThread):
-    result_ready = pyqtSignal(str)
-
-    def __init__(self, query, parent=None):
-        super().__init__(parent)
-        self.query = query
-
-    def run(self):
-        try:
-            from engine import web_search
-            result = web_search.search_web(self.query, num_results=3)
-            self.result_ready.emit(result)
-        except Exception as e:
-            self.result_ready.emit(f"❌ Search error: {str(e)[:50]}")
+            app_logger.error(f"Proactive vision error: {e}")
 
 
 class ApiStatusThread(QThread):
@@ -268,286 +225,72 @@ class ApiStatusThread(QThread):
         self.running = False
 
 
+class ToastNotification(QWidget):
+    """Small fade-in/out toast used for proactive Sia nudges."""
+
+    def __init__(self, text: str, duration_ms: int = 3600, parent=None):
+        super().__init__(parent)
+        self.duration_ms = max(1200, int(duration_ms))
+        self.setWindowFlags(
+            Qt.Tool |
+            Qt.FramelessWindowHint |
+            Qt.WindowStaysOnTopHint |
+            Qt.WindowDoesNotAcceptFocus
+        )
+        self.setAttribute(Qt.WA_TranslucentBackground, True)
+
+        self.opacity_effect = QGraphicsOpacityEffect(self)
+        self.opacity_effect.setOpacity(0.0)
+        self.setGraphicsEffect(self.opacity_effect)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(10, 8, 10, 8)
+
+        label = QLabel(text)
+        label.setWordWrap(True)
+        label.setStyleSheet(
+            "QLabel {"
+            " background: rgba(8, 14, 26, 225);"
+            " color: #E8FFFC;"
+            " border: 1px solid rgba(0,255,204,0.38);"
+            " border-radius: 10px;"
+            " padding: 8px 10px;"
+            " font-family: 'Segoe UI';"
+            " font-size: 10px;"
+            "}"
+        )
+        layout.addWidget(label)
+
+        self.resize(280, 78)
+
+    def show_toast(self):
+        screen = QApplication.primaryScreen().availableGeometry()
+        x = screen.right() - self.width() - 24
+        y = screen.bottom() - self.height() - 30
+        self.move(x, y)
+        self.show()
+
+        self._fade_in = QPropertyAnimation(self.opacity_effect, b"opacity", self)
+        self._fade_in.setDuration(220)
+        self._fade_in.setStartValue(0.0)
+        self._fade_in.setEndValue(1.0)
+        self._fade_in.setEasingCurve(QEasingCurve.OutCubic)
+        self._fade_in.start()
+
+        QTimer.singleShot(self.duration_ms, self._fade_out_and_close)
+
+    def _fade_out_and_close(self):
+        self._fade_out = QPropertyAnimation(self.opacity_effect, b"opacity", self)
+        self._fade_out.setDuration(260)
+        self._fade_out.setStartValue(self.opacity_effect.opacity())
+        self._fade_out.setEndValue(0.0)
+        self._fade_out.setEasingCurve(QEasingCurve.InCubic)
+        self._fade_out.finished.connect(self.close)
+        self._fade_out.start()
+
+
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #  GLASSMORPHISM SIDE PANEL
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-class SidePanel(QWidget):
-    """Floating glass-morphism control panel — slides in from the right."""
-
-    mic_clicked    = pyqtSignal()
-    vision_clicked = pyqtSignal()
-    search_clicked = pyqtSignal()
-    pin_clicked    = pyqtSignal()
-    close_clicked  = pyqtSignal()
-    text_submitted = pyqtSignal(str)
-
-    def __init__(self, parent=None):
-        super().__init__(parent, Qt.Tool | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint)
-        self.setAttribute(Qt.WA_TranslucentBackground, True)
-        self.setAttribute(Qt.WA_NoSystemBackground, True)
-        self.setFixedSize(PANEL_W, PANEL_H)
-        self._pinned = False
-        self._hide_timer = QTimer(self)
-        self._hide_timer.setSingleShot(True)
-        self._hide_timer.timeout.connect(self._auto_hide)
-        self._build_ui()
-
-    # ── Build ──────────────────────────────────────────────
-
-    def _build_ui(self):
-        self.setContentsMargins(0, 0, 0, 0)
-
-        # Compact card layout: badge + 2x2 action grid + bottom controls.
-        main_layout = QHBoxLayout(self)
-        main_layout.setContentsMargins(8, 8, 8, 8)
-        main_layout.setSpacing(0)
-
-        # Container for the controls inside the glass panel.
-        vbox = QVBoxLayout()
-        vbox.setSpacing(8)
-        vbox.setAlignment(Qt.AlignTop)
-
-        # API status badge (small, sleek at top)
-        self.api_label = QLabel("⏳ API", self)
-        self.api_label.setAlignment(Qt.AlignCenter)
-        self.api_label.setStyleSheet("""
-            QLabel {
-                color: #00FFCC;
-                font-family: 'Segoe UI', Arial, sans-serif;
-                font-size: 10px;
-                font-weight: bold;
-                padding: 5px 6px;
-                border-radius: 6px;
-                background: rgba(0,255,204,0.1);
-                border: 1px solid rgba(0,255,204,0.3);
-            }
-        """)
-        vbox.addWidget(self.api_label)
-
-        # Small divider
-        line = QFrame(self)
-        line.setFrameShape(QFrame.HLine)
-        line.setStyleSheet("color: rgba(255,255,255,0.15);")
-        vbox.addWidget(line)
-
-        # Action buttons arranged as a compact grid instead of a vertical stack.
-        self.mic_btn    = self._make_btn("🎤", "#FF6B98", "Voice Input")
-        self.vision_btn = self._make_btn("📷", "#FFD700", "Analyze Screen")
-        self.search_btn = self._make_btn("🔍", "#00BFFF", "Web Search")
-        self.pin_btn    = self._make_btn("📌", "#00FFCC", "Pin Panel")
-        self.close_btn  = self._make_btn("✕", "#FF4444", "Close App")
-
-        grid = QGridLayout()
-        grid.setContentsMargins(0, 0, 0, 0)
-        grid.setHorizontalSpacing(8)
-        grid.setVerticalSpacing(8)
-        grid.addWidget(self.mic_btn, 0, 0)
-        grid.addWidget(self.vision_btn, 0, 1)
-        grid.addWidget(self.search_btn, 1, 0)
-        grid.addWidget(self.pin_btn, 1, 1)
-
-        vbox.addLayout(grid)
-        vbox.addStretch(1)
-        vbox.addWidget(self.close_btn)
-
-        main_layout.addLayout(vbox)
-
-        # Wire buttons
-        self.mic_btn.clicked.connect(self.mic_clicked.emit)
-        self.vision_btn.clicked.connect(self.vision_clicked.emit)
-        self.search_btn.clicked.connect(self.search_clicked.emit)
-        self.pin_btn.clicked.connect(self._toggle_pin)
-        self.close_btn.clicked.connect(self.close_clicked.emit)
-
-        # Note: Text input is removed from the side panel to keep it sleek.
-        # User can speak or type in a dedicated chat window or prompt later.
-
-    def _make_btn(self, icon_text, color, tooltip):
-        btn = QPushButton(icon_text, self)
-        btn.setToolTip(tooltip)
-        r, g, b = QColor(color).red(), QColor(color).green(), QColor(color).blue()
-        btn.setStyleSheet(f"""
-            QPushButton {{
-                background: rgba({r},{g},{b}, 25);
-                color: {color};
-                font-family: 'Segoe UI Emoji', 'Segoe UI', Arial;
-                font-size: 15px;
-                padding: 8px;
-                border-radius: 12px;
-                border: 1px solid rgba({r},{g},{b}, 0.3);
-            }}
-            QPushButton:hover {{
-                background: rgba({r},{g},{b}, 65);
-                border: 1px solid rgba({r},{g},{b}, 0.7);
-            }}
-            QPushButton:pressed {{
-                background: rgba({r},{g},{b}, 120);
-            }}
-        """)
-        btn.setFixedSize(40, 40)
-        btn.setCursor(Qt.PointingHandCursor)
-        return btn
-
-    # ── Panel painting (glassmorphism) ────────────────────
-
-    def paintEvent(self, event):
-        p = QPainter(self)
-        p.setRenderHint(QPainter.Antialiasing)
-        w, h = self.width(), self.height()
-
-        # Ultra-sleek Glass body
-        path = QPainterPath()
-        path.addRoundedRect(QRectF(2, 2, w - 4, h - 4), 16, 16)
-        
-        # Soft dark gradient background
-        bg_grad = QLinearGradient(0, 0, w, h)
-        bg_grad.setColorAt(0, QColor(10, 10, 25, 200))
-        bg_grad.setColorAt(1, QColor(5, 5, 15, 230))
-        
-        p.setBrush(QBrush(bg_grad))
-        p.setPen(QPen(QColor(0, 255, 204, 60), 1.0))
-        p.drawPath(path)
-        
-        # Edge highlight
-        p.setPen(QPen(QColor(255, 255, 255, 40), 1.0))
-        path_inner = QPainterPath()
-        path_inner.addRoundedRect(QRectF(3, 3, w - 6, h - 6), 15, 15)
-        p.setBrush(Qt.NoBrush)
-        p.drawPath(path_inner)
-        
-        p.end()
-
-    # ── Logic ─────────────────────────────────────────────
-
-    def _on_text_enter(self):
-        text = self.text_input.text().strip()
-        if text:
-            self.text_input.clear()
-            self.text_submitted.emit(text)
-
-    def _toggle_pin(self):
-        self._pinned = not self._pinned
-        self.pin_btn.setText("📌  Pinned" if self._pinned else "📌  Pin")
-        if self._pinned:
-            self._hide_timer.stop()
-        else:
-            self._hide_timer.start(3000)
-
-    def update_api_status(self, status: dict):
-        text  = status.get("status_text", "?")
-        color_map = {"green": "#00FFCC", "yellow": "#FFD700", "red": "#FF4444"}
-        color = color_map.get(status.get("status_color", "green"), "#00FFCC")
-        self.api_label.setText(text)
-        self.api_label.setStyleSheet(f"""
-            QLabel {{
-                color: {color};
-                font-family: 'Segoe UI', sans-serif;
-                font-size: 11px;
-                padding: 4px 8px;
-                border-radius: 8px;
-                background: rgba(0,0,0,0.15);
-                border: 1px solid {color}44;
-            }}
-        """)
-
-    def show_panel(self):
-        self.show()
-        self.raise_()
-        if not self._pinned:
-            self._hide_timer.start(4000)
-
-    def _auto_hide(self):
-        if not self._pinned:
-            # Fade out
-            self._fade_out()
-
-    def _fade_out(self):
-        anim = QPropertyAnimation(self, b"windowOpacity", self)
-        anim.setDuration(350)
-        anim.setStartValue(self.windowOpacity())
-        anim.setEndValue(0.0)
-        anim.setEasingCurve(QEasingCurve.OutCubic)
-        anim.finished.connect(self.hide)
-        anim.finished.connect(lambda: self.setWindowOpacity(1.0))
-        anim.start()
-
-    def enterEvent(self, event):
-        self._hide_timer.stop()
-        self.setWindowOpacity(1.0)
-
-    def leaveEvent(self, event):
-        if not self._pinned:
-            self._hide_timer.start(2500)
-
-
-class TaskbarDock(QWidget):
-    """Minimal dock for WhatsApp and Work mode, anchored to the taskbar edge."""
-
-    wa_clicked = pyqtSignal()
-    work_clicked = pyqtSignal()
-
-    def __init__(self, parent=None):
-        super().__init__(parent, Qt.Tool | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint)
-        self.setAttribute(Qt.WA_TranslucentBackground, True)
-        self.setAttribute(Qt.WA_NoSystemBackground, True)
-        self.setFixedSize(DOCK_W, DOCK_H)
-
-        layout = QHBoxLayout(self)
-        layout.setContentsMargins(10, 10, 10, 10)
-        layout.setSpacing(8)
-
-        self.wa_btn = self._make_btn("WA", "#00C2FF", "Open WhatsApp")
-        self.work_btn = self._make_btn("Work", "#00FFCC", "Work Mode")
-
-        layout.addWidget(self.wa_btn)
-        layout.addWidget(self.work_btn)
-
-        self.wa_btn.clicked.connect(self.wa_clicked.emit)
-        self.work_btn.clicked.connect(self.work_clicked.emit)
-
-    def _make_btn(self, label, color, tooltip):
-        btn = QPushButton(label, self)
-        btn.setToolTip(tooltip)
-        btn.setCursor(Qt.PointingHandCursor)
-        btn.setStyleSheet(f"""
-            QPushButton {{
-                background: rgba(8, 8, 22, 190);
-                color: {color};
-                font-family: 'Segoe UI', sans-serif;
-                font-size: 12px;
-                font-weight: 700;
-                padding: 8px 12px;
-                border-radius: 15px;
-                border: 1px solid {color}66;
-            }}
-            QPushButton:hover {{
-                background: rgba(16, 16, 36, 235);
-                border: 1px solid {color}CC;
-            }}
-            QPushButton:pressed {{
-                background: rgba(0, 0, 0, 220);
-            }}
-        """)
-        return btn
-
-    def paintEvent(self, event):
-        p = QPainter(self)
-        p.setRenderHint(QPainter.Antialiasing)
-        rect = QRectF(2, 2, self.width() - 4, self.height() - 4)
-        path = QPainterPath()
-        path.addRoundedRect(rect, 18, 18)
-        grad = QLinearGradient(0, 0, self.width(), self.height())
-        grad.setColorAt(0, QColor(8, 8, 22, 180))
-        grad.setColorAt(1, QColor(18, 18, 36, 210))
-        p.setBrush(QBrush(grad))
-        p.setPen(QPen(QColor(255, 255, 255, 30), 1.0))
-        p.drawPath(path)
-        p.end()
-
-
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-#  MAIN AVATAR WINDOW
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 class SiaDesktop(QWidget):
@@ -567,19 +310,27 @@ class SiaDesktop(QWidget):
         self.bubble_text   = ""
         self.bubble_display_text = ""
         self.typewriter_index    = 0
-        self.tick          = 0.0
+
+        # ── Animation Engine (NEW: replaces manual tick/breath vars) ──
+        self.anim_engine   = AnimationEngine()
+        # Keep compat aliases so existing paintEvent code still works
+        self.tick          = 0.0         # updated from anim_engine in _animation_tick
         self.breath_offset = 0.0
 
         self.character_pixmap  = None
         self.character_rect    = QRect()
+        self.blink_pixmap      = None    # NEW: blink frame
         self.lip_pixmaps       = []
         self.lip_frame_index   = 0
         self.lip_tick_counter  = 0
-        self.lip_tick_speed    = 3        # advance frame every 3×50ms = 150ms
+        self.lip_tick_speed    = 2
 
         self.current_mood      = "DEFAULT"
         self.is_on_top         = True
         self.weather_widget_ref = None
+        self._last_vision_mode = "cloud"
+        self._last_vision_notice_ts = 0.0
+        self._compact_overlay_ui = False
 
         # Drag support
         self._drag_pos = None
@@ -615,6 +366,69 @@ class SiaDesktop(QWidget):
         # ── Size & position: screen-sized transparent canvas ──
         self.setGeometry(screen)
 
+        # ── Breathing Logic (Sine-Wave Motion) ──
+        # time_counter is in seconds, frequency is radians/sec.
+        self.base_y = self.y()
+        self.amplitude = 4.0
+        self.breath_period = 2.6
+        self.frequency = (2.0 * math.pi) / self.breath_period
+        self.time_counter = 0.0
+        self.breathing_offset_y = 0.0
+        self.breathing_offset_x = 0.0
+        self.live_scale = 1.0
+        self.live_shadow_scale = 1.0
+        self.head_tilt_deg = 0.0
+        self.parallax_strength = 0.0
+        self.micro_jitter_x = 0.0
+        self.micro_jitter_y = 0.0
+        self._jitter_decay = 0.0
+        self._next_jitter_at = time.time() + random.uniform(1.2, 2.8)
+        self._breathing_last_ts = time.time()
+        self.motion_mode = "auto-switch"
+        self.realism_level = 78
+        self.realism_slider_window = None
+        self.realism_value_label = None
+        self._realism_autohide_timer = QTimer(self)
+        self._realism_autohide_timer.setSingleShot(True)
+        self._realism_autohide_timer.timeout.connect(self._auto_close_realism_slider)
+        self._motion_settings_path = os.path.join(CACHE_DIR, "motion_settings.json")
+        self._tray_hint_path = os.path.join(CACHE_DIR, ".tray_hint_seen")
+        self.motion_profiles = {
+            "calm": {
+                "amp": 3.2,
+                "x_sway": 0.75,
+                "scale": 0.006,
+                "talk_boost": 0.35,
+                "tilt": 0.55,
+                "jitter": 0.45,
+                "parallax": 0.7,
+            },
+            "expressive": {
+                "amp": 5.0,
+                "x_sway": 1.45,
+                "scale": 0.013,
+                "talk_boost": 1.1,
+                "tilt": 1.05,
+                "jitter": 0.9,
+                "parallax": 1.7,
+            },
+            "auto-switch": {
+                "amp": 4.2,
+                "x_sway": 1.15,
+                "scale": 0.010,
+                "talk_boost": 0.8,
+                "tilt": 0.8,
+                "jitter": 0.7,
+                "parallax": 1.2,
+            },
+        }
+
+        self._load_motion_settings()
+        
+        self.breathing_loop_timer = QTimer(self)
+        self.breathing_loop_timer.timeout.connect(self._breathing_loop)
+        self.breathing_loop_timer.start(50) # equivalent to Tkinter .after(50, self._breathing_loop)
+
         # ── Win32 DWM transparency (removes remnant halo) ──
         self._apply_win32_transparency()
 
@@ -635,22 +449,41 @@ class SiaDesktop(QWidget):
         self.status_label.adjustSize()
         self._position_status_label()
 
-        # ── Side Panel ──
-        self.side_panel = SidePanel()
-        self.side_panel.mic_clicked.connect(self._manual_voice_input)
-        self.side_panel.vision_clicked.connect(self._vision_screen)
-        self.side_panel.search_clicked.connect(self._start_search)
-        self.side_panel.pin_clicked.connect(self._toggle_on_top)
-        self.side_panel.close_clicked.connect(self.close)
-        self.side_panel.text_submitted.connect(self._on_text_recognized)
-        self._position_side_panel()
+        self.vision_mode_label = QLabel("📷 Vision: Cloud", self)
+        self.vision_mode_label.setAlignment(Qt.AlignCenter)
+        self.vision_mode_label.setStyleSheet("""
+            QLabel {
+                background: rgba(0, 40, 30, 165);
+                color: #00FFCC;
+                font-family: 'Segoe UI', sans-serif;
+                font-size: 10px;
+                padding: 3px 8px;
+                border-radius: 9px;
+                border: 1px solid rgba(0,255,204,0.35);
+            }
+        """)
+        self.vision_mode_label.adjustSize()
 
-        # ── Taskbar Dock ──
-        self.taskbar_dock = TaskbarDock(self)
-        self.taskbar_dock.wa_clicked.connect(self._open_whatsapp)
-        self.taskbar_dock.work_clicked.connect(self._open_work_mode)
-        self.taskbar_dock.show()
-        self._position_taskbar_dock()
+        self.motion_mode_label = QLabel("🎬 Motion: Auto | 78%", self)
+        self.motion_mode_label.setAlignment(Qt.AlignCenter)
+        self.motion_mode_label.setStyleSheet("""
+            QLabel {
+                background: rgba(18, 24, 42, 165);
+                color: #9AFBFF;
+                font-family: 'Segoe UI', sans-serif;
+                font-size: 10px;
+                padding: 3px 8px;
+                border-radius: 9px;
+                border: 1px solid rgba(154,251,255,0.32);
+            }
+        """)
+        self.motion_mode_label.adjustSize()
+
+        self._update_motion_badge()
+        self._refresh_overlay_layout_mode()
+        self._position_status_label()
+
+        # ── Side Panel & Dock (Removed for Center Overlay Mode) ──
 
         # ── Timers ──
         self.typewriter_timer = QTimer(self)
@@ -677,9 +510,14 @@ class SiaDesktop(QWidget):
         )
         self.proactive_engine.start()
 
+        # ── 5-Minute Proactive Vision Loop ──
+        self.proactive_vision_timer = QTimer(self)
+        self.proactive_vision_timer.timeout.connect(self._run_proactive_vision_loop)
+        self.proactive_vision_timer.start(300000)  # 5 minutes (300,000 ms)
+
         # ── API Status polling ──
         self.api_status_thread = ApiStatusThread()
-        self.api_status_thread.status_updated.connect(self.side_panel.update_api_status)
+        self.api_status_thread.status_updated.connect(self._on_api_status_updated)
         self.api_status_thread.start()
 
         # ── Memory preload ──
@@ -693,9 +531,23 @@ class SiaDesktop(QWidget):
 
         # ── Wake Word Thread ──
         self.wake_thread = WakeWordThread()
-        self.wake_thread.wake_word_detected.connect(self._on_wake_word)
+        self.wake_thread.text_recognized.connect(self._on_seamless_text)
         self.wake_thread.status_changed.connect(self._on_status_change)
         self.wake_thread.start()
+
+        # ── Voice Interrupt Monitor (VAD) ──
+        try:
+            from engine.listen_engine import VoiceInterruptMonitor
+            self.vad_monitor = VoiceInterruptMonitor(
+                interrupt_callback=self._on_user_interrupt,
+                is_speaking_fn=voice_engine.get_speaking_state,
+                rms_threshold=1200,
+            )
+            self.vad_monitor.start()
+            app_logger.info("[VAD Monitor] Voice interruption active.")
+        except Exception as e:
+            app_logger.warning(f"[VAD Monitor] Could not start: {e}")
+            self.vad_monitor = None
 
         # ── Greeting ──
         hour = time.localtime().tm_hour
@@ -706,13 +558,13 @@ class SiaDesktop(QWidget):
         self._show_bubble(f"Sia ❤️: {g}")
 
         self.show()
+        self._show_startup_self_check_toast()
         app_logger.info("✅ Sia Desktop v3.0 is LIVE!")
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
+        self._refresh_overlay_layout_mode()
         self._position_status_label()
-        self._position_side_panel()
-        self._position_taskbar_dock()
 
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     #  ASSETS
@@ -721,16 +573,16 @@ class SiaDesktop(QWidget):
     def _load_character(self, emotion="IDLE"):
         """Load avatar frame for given emotion. Lip-sync frames always cached."""
         emotion_files = {
-            "IDLE":      ["Sia_closed.png", "sia_idle.png"],
+            "IDLE":      ["sia_idle.png"],
             "SMILE":     ["Sia_open.png",   "sia_idle.png"],
             "HAPPY":     ["Sia_open.png",   "sia_idle.png"],
-            "SAD":       ["Sia_closed.png", "sia_idle.png"],
-            "CONCERNED": ["Sia_closed.png", "sia_idle.png"],
+            "SAD":       ["sia_idle.png"],
+            "CONCERNED": ["sia_idle.png"],
             "CONFUSED":  ["Sia_semi.png",   "sia_idle.png"],
             "SURPRISED": ["Sia_open.png",   "sia_idle.png"],
-            "ANGRY":     ["Sia_closed.png", "sia_idle.png"],
+            "ANGRY":     ["sia_idle.png"],
         }
-        filenames = emotion_files.get(emotion.upper(), ["Sia_closed.png", "sia_idle.png"])
+        filenames = emotion_files.get(emotion.upper(), ["sia_idle.png"])
 
         for fn in filenames:
             for base in [ASSETS_DIR, SCRIPT_DIR]:
@@ -746,13 +598,20 @@ class SiaDesktop(QWidget):
 
         # Cache lip-sync frames once
         if not self.lip_pixmaps:
-            for fn in ["Sia_closed.png", "Sia_semi.png", "Sia_open.png"]:
+            for fn in ["sia_idle.png", "Sia_semi.png", "Sia_open.png"]:
                 path = os.path.join(ASSETS_DIR, fn)
                 lp   = QPixmap(path)
                 if lp.isNull() and self.character_pixmap:
                     lp = self.character_pixmap
                 self.lip_pixmaps.append(lp)
             app_logger.info(f"✅ Lip-sync frames: {len(self.lip_pixmaps)} loaded")
+
+        # Load blink frame (NEW)
+        if self.blink_pixmap is None:
+            blink_path = os.path.join(ASSETS_DIR, "sia_blink.png")
+            bp = QPixmap(blink_path)
+            self.blink_pixmap = bp if not bp.isNull() else self.character_pixmap
+            app_logger.info("✅ Blink frame loaded" if not bp.isNull() else "⚠️  Blink frame not found, using idle")
 
     def _apply_win32_transparency(self):
         """Remove DWM halo border (Windows only)."""
@@ -761,13 +620,13 @@ class SiaDesktop(QWidget):
         try:
             hwnd = int(self.winId())
             try:
-                import win32con
-                import win32gui
+                import win32con  # type: ignore[reportMissingImports]
+                import win32gui  # type: ignore[reportMissingImports]
 
                 ex_style = win32gui.GetWindowLong(hwnd, win32con.GWL_EXSTYLE)
-                ex_style |= win32con.WS_EX_LAYERED
-                win32gui.SetWindowLong(hwnd, win32con.GWL_EXSTYLE, ex_style)
-                win32gui.SetLayeredWindowAttributes(hwnd, 0, 255, win32con.LWA_ALPHA)
+                # Ensure WS_EX_TRANSPARENT allows clicks to directly pass through
+                win32gui.SetWindowLong(hwnd, win32con.GWL_EXSTYLE, ex_style | win32con.WS_EX_LAYERED | win32con.WS_EX_TRANSPARENT)
+                # Let PyQt5 handle the alpha channel via DWM
                 win32gui.SetWindowPos(
                     hwnd, 0, 0, 0, 0, 0,
                     win32con.SWP_NOMOVE |
@@ -806,7 +665,14 @@ class SiaDesktop(QWidget):
         tray_menu.addAction(QAction("👁️ Show Sia",  self, triggered=self.show))
         tray_menu.addAction(QAction("👻 Hide Sia",  self, triggered=self.hide))
         tray_menu.addSeparator()
-        tray_menu.addAction(QAction("🎛️ Panel",     self, triggered=self._show_panel))
+        motion_menu = tray_menu.addMenu("🎬 Motion Style")
+        motion_menu.addAction(QAction("🧘 Calm", self, triggered=lambda: self._set_motion_mode("calm")))
+        motion_menu.addAction(QAction("🔥 Expressive", self, triggered=lambda: self._set_motion_mode("expressive")))
+        motion_menu.addAction(QAction("⚙️ Auto Switch", self, triggered=lambda: self._set_motion_mode("auto-switch")))
+        tray_menu.addAction(QAction("🎚 Realism Slider", self, triggered=self._open_realism_slider))
+        tray_menu.addAction(QAction("♻ Reset Motion", self, triggered=self._reset_motion_settings))
+        tray_menu.addAction(QAction("🧼 Reset All UI", self, triggered=self._reset_all_ui_settings))
+        tray_menu.addSeparator()
         tray_menu.addSeparator()
         tray_menu.addAction(QAction("❌ Exit",       self, triggered=self._quit_app))
 
@@ -814,6 +680,20 @@ class SiaDesktop(QWidget):
         self.tray_icon.setToolTip("Sia — Your AI Assistant ❤️")
         self.tray_icon.activated.connect(self._on_tray_activated)
         self.tray_icon.show()
+
+        if not os.path.exists(self._tray_hint_path):
+            self.tray_icon.showMessage(
+                "Sia Controls",
+                "Right-click tray icon for Motion Style and Realism Slider.",
+                QSystemTrayIcon.Information,
+                5000
+            )
+            try:
+                os.makedirs(CACHE_DIR, exist_ok=True)
+                with open(self._tray_hint_path, "w", encoding="utf-8") as f:
+                    f.write("seen")
+            except Exception as e:
+                app_logger.warning(f"Could not persist tray hint marker: {e}")
 
     def _on_tray_activated(self, reason):
         if reason == QSystemTrayIcon.DoubleClick:
@@ -830,6 +710,7 @@ class SiaDesktop(QWidget):
         """
         Draw ONLY the avatar + speech bubble on a transparent canvas.
         NO background fill → wallpaper fully visible.
+        Center-Bottom Overlay Mode, Alpha-Blending support.
         """
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing)
@@ -837,55 +718,97 @@ class SiaDesktop(QWidget):
         w, h = self.width(), self.height()
 
         center_x = w // 2
-        center_y = h // 2
+
+        # ── Alpha Blending using AnimationEngine ──
+        bf = self.anim_engine.blend  # BlendFrame: frame_from, frame_to, alpha
+        lip_map = {"idle": 0, "semi": 1, "open": 2}
+
+        def get_pixmap(key):
+            if key == "blink" and self.blink_pixmap:
+                return self.blink_pixmap
+            elif key in lip_map and self.lip_pixmaps:
+                return self.lip_pixmaps[lip_map[key]]
+            return self.character_pixmap
+
+        pix_from = get_pixmap(bf.frame_from)
+        pix_to = get_pixmap(bf.frame_to)
+
+        # Box rect is used mostly for waveform and speech bubble relative placement now
+        # We will keep a virtual box_rect for those elements near the avatar.
+        base_w, base_h = 450, 600
+        pulse = getattr(self.anim_engine, 'pulse_scale', 1.0)
+        motion_scale = pulse * self.live_scale
+        char_w = int(base_w * motion_scale)
+        char_h = int(base_h * motion_scale)
+        
+        # Position her at the very bottom center of the screen
+        char_x = int(center_x - char_w // 2 + self.breathing_offset_x)
+        char_y = int(h - char_h + self.breathing_offset_y)
+        
         box_rect = QRectF(
             center_x - CANVAS_BOX_W / 2,
-            center_y - CANVAS_BOX_H / 2,
+            char_y - 20, 
             CANVAS_BOX_W,
-            CANVAS_BOX_H
+            char_h + 40
         )
+        self.character_rect = QRect(char_x, char_y, char_w, char_h)
 
-        self._draw_memory_box(p, box_rect)
-
-        # ── Pick correct pixmap (lip-sync or idle) ──
-        cycle_map   = [0, 1, 2, 1]
-        if self.current_state == "speaking" and self.lip_pixmaps:
-            frame_idx  = cycle_map[self.lip_frame_index % len(cycle_map)]
-            active_pix = self.lip_pixmaps[frame_idx]
-        else:
-            active_pix = self.character_pixmap
-
-        # ── Draw avatar ──
-        if active_pix and not active_pix.isNull():
-            char_h  = min(int(CANVAS_BOX_H * 0.72), 460)
-            scaled  = active_pix.scaledToHeight(char_h, Qt.SmoothTransformation)
-            char_x  = center_x - scaled.width() // 2
-            char_y  = int(box_rect.top() + 92 + self.breath_offset)
-            self.character_rect = QRect(char_x, char_y, scaled.width(), scaled.height())
+        if pix_from and not pix_from.isNull():
+            scaled_from = pix_from.scaled(char_w, char_h, Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
+            scaled_to = pix_to.scaled(char_w, char_h, Qt.IgnoreAspectRatio, Qt.SmoothTransformation) if pix_to else scaled_from
 
             # Soft ground shadow
-            sg = QRadialGradient(center_x, char_y + char_h - 12, scaled.width() * 0.38)
+            sg = QRadialGradient(center_x + self.breathing_offset_x * 0.4, char_y + char_h - 12, char_w * 0.38 * self.live_shadow_scale)
             sg.setColorAt(0.0, QColor(0, 0, 0, 45))
             sg.setColorAt(1.0, QColor(0, 0, 0, 0))
             p.setBrush(QBrush(sg))
             p.setPen(Qt.NoPen)
             p.drawEllipse(
-                QPointF(center_x, char_y + char_h - 6),
-                scaled.width() * 0.32, 14
+                QPointF(center_x + self.breathing_offset_x * 0.4, char_y + char_h - 6),
+                char_w * 0.32 * self.live_shadow_scale, 14 * self.live_shadow_scale
             )
 
-            p.drawPixmap(char_x, char_y, scaled)
+            # Shared transform pivot for subtle head/body tilt.
+            pivot = QPointF(char_x + char_w / 2, char_y + char_h * 0.58)
 
-        # ── Neon glow ring around avatar (idle pulse) ──
-        if self.current_state == "idle":
-            pulse_a = int(18 + 10 * math.sin(self.tick * 1.8))
-            glow_r  = QRadialGradient(center_x, center_y, CANVAS_BOX_W * 0.42)
-            glow_r.setColorAt(0.6, QColor(0, 255, 204, 0))
-            glow_r.setColorAt(1.0, QColor(0, 255, 204, pulse_a))
-            p.setBrush(QBrush(glow_r))
-            p.setPen(Qt.NoPen)
-            p.drawEllipse(QPointF(center_x, center_y),
-                          CANVAS_BOX_W * 0.46, CANVAS_BOX_H * 0.50)
+            # Speaking depth pass: faint rear layer to fake torso parallax.
+            if self.current_state == "speaking" and self.parallax_strength > 0.05:
+                rear_w = int(char_w * 1.01)
+                rear_h = int(char_h * 1.01)
+                rear_x = int(char_x - (rear_w - char_w) / 2 - self.parallax_strength)
+                rear_y = int(char_y - (rear_h - char_h) / 2 + 1.2)
+                rear_map = pix_from.scaled(rear_w, rear_h, Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
+                p.save()
+                p.translate(pivot)
+                p.rotate(self.head_tilt_deg * 0.35)
+                p.translate(-pivot)
+                p.setOpacity(0.12)
+                p.drawPixmap(rear_x, rear_y, rear_map)
+                p.restore()
+
+            # Draw Base Frame (frame_from)
+            opacity_from = (255 - bf.alpha) / 255.0
+            if opacity_from > 0:
+                p.save()
+                p.translate(pivot)
+                p.rotate(self.head_tilt_deg)
+                p.translate(-pivot)
+                p.setOpacity(opacity_from)
+                p.drawPixmap(char_x, char_y, scaled_from)
+                p.restore()
+
+            # Draw Target Frame (frame_to)
+            opacity_to = bf.alpha / 255.0
+            if opacity_to > 0:
+                p.save()
+                p.translate(pivot)
+                p.rotate(self.head_tilt_deg)
+                p.translate(-pivot)
+                p.setOpacity(opacity_to)
+                p.drawPixmap(char_x, char_y, scaled_to)
+                p.restore()
+
+            p.setOpacity(1.0)
 
         # ── Speech Bubble ──
         if self.bubble_display_text:
@@ -959,8 +882,17 @@ class SiaDesktop(QWidget):
         bub_h    = text_h + pad * 2
 
         bub_x = max(8, int(box_rect.center().x() - bub_w / 2))
-        # Place bubble in the upper portion of the centered canvas box
         bub_y = max(8, int(box_rect.top() + 24))
+
+        if hasattr(self, 'character_rect') and not self.character_rect.isEmpty():
+            # Place to her left
+            bub_x = max(8, int(self.character_rect.left() - bub_w - 20))
+            # If no space on left, move to right
+            if bub_x <= 8:
+                bub_x = min(w - bub_w - 8, int(self.character_rect.right() + 20))
+            
+            # Align Y roughly with the top portion of her head
+            bub_y = int(self.character_rect.top() + self.character_rect.height() * 0.1)
 
         is_speaking = self.current_state == "speaking"
         pulse = 0.4 + 0.6 * (0.5 + 0.5 * math.sin(self.tick * 4)) if is_speaking else 0.4
@@ -973,12 +905,13 @@ class SiaDesktop(QWidget):
         gp = QPainterPath()
         gp.addRoundedRect(QRectF(bub_x - 8, bub_y - 8, bub_w + 16, bub_h + 16), 20, 20)
         p.setPen(Qt.NoPen)
-        p.setBrush(QColor(0, 160, 255, int(16 * pulse)))
+        p.setBrush(QColor(0, 255, 255, int(30 * pulse)))  # Cyan glow
         p.drawPath(gp)
 
-        # Glass fill
-        p.setBrush(QColor(8, 8, 25, int(195 * (0.8 + 0.2 * pulse))))
-        p.setPen(QPen(QColor(0, 200, 255, int(90 * pulse)), 1.2))
+        # Glass fill: Semi-transparent dark blue
+        p.setBrush(QColor(10, 20, 45, int(210 * (0.8 + 0.2 * pulse))))
+        # Cyan glow border
+        p.setPen(QPen(QColor(0, 255, 255, int(140 * pulse)), 1.5))
         p.drawPath(path)
 
         # Top shimmer
@@ -1047,22 +980,85 @@ class SiaDesktop(QWidget):
     #  ANIMATION TICK
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-    def _animation_tick(self):
-        self.tick         += 0.1
-        self.breath_offset = math.sin(self.tick * 1.5) * 3.0
+    def _breathing_loop(self):
+        """Smooth, continuous breathing motion for avatar window/pose."""
+        now = time.time()
+        dt = max(0.0, now - self._breathing_last_ts)
+        self._breathing_last_ts = now
+        self.time_counter += dt
 
-        # ── Lip-sync ──
-        if self.lip_pixmaps:
+        profile = self._get_motion_profile()
+        realism_mul = self._get_realism_multiplier()
+        amp = profile["amp"] * realism_mul
+        x_sway = profile["x_sway"] * realism_mul
+        scale_strength = profile["scale"] * realism_mul
+        talk_boost = profile["talk_boost"] * realism_mul
+        tilt_strength = profile["tilt"] * realism_mul
+        jitter_strength = profile["jitter"] * realism_mul
+        parallax_strength = profile["parallax"] * realism_mul
+
+        # Core sine wave: new_y = base_y + amplitude * sin(time_counter * frequency)
+        new_y = self.base_y + (amp * math.sin(self.time_counter * self.frequency))
+
+        # Add layered micro-motions so Sia feels like a live character, not a sticker.
+        sway_phase = self.time_counter * 1.05
+        micro_phase = self.time_counter * 2.1
+        self.breathing_offset_x = x_sway * math.sin(sway_phase + 0.8)
+        self.live_scale = 1.0 + scale_strength * math.sin(self.time_counter * 1.1) + (scale_strength * 0.4) * math.sin(micro_phase)
+        self.live_shadow_scale = 0.96 + 0.08 * (0.5 + 0.5 * math.sin(self.time_counter * 1.15 + 0.4))
+        self.head_tilt_deg = (0.7 * tilt_strength) * math.sin(self.time_counter * 0.9) + (0.3 * tilt_strength) * math.sin(self.time_counter * 2.0 + 0.6)
+        self.parallax_strength = 0.0
+
+        # Occasional micro-jitter gives an alive eye/head micro-adjustment illusion.
+        if now >= self._next_jitter_at:
+            self.micro_jitter_x = random.uniform(-0.7, 0.7) * jitter_strength
+            self.micro_jitter_y = random.uniform(-0.5, 0.5) * jitter_strength
+            self._jitter_decay = 1.0
             if self.current_state == "speaking":
-                self.lip_tick_counter += 1
-                if self.lip_tick_counter >= self.lip_tick_speed:
-                    self.lip_tick_counter = 0
-                    self.lip_frame_index  = (self.lip_frame_index + 1) % 4
+                self._next_jitter_at = now + random.uniform(0.8, 1.6)
             else:
-                self.lip_frame_index  = 0
-                self.lip_tick_counter = 0
+                self._next_jitter_at = now + random.uniform(1.6, 3.2)
 
-        # ── Opacity ──
+        self._jitter_decay *= 0.84
+        self.breathing_offset_x += self.micro_jitter_x * self._jitter_decay
+
+        # Slightly accent motion while speaking to mimic natural conversational body movement.
+        if self.current_state == "speaking":
+            self.breathing_offset_x += talk_boost * math.sin(self.time_counter * 3.2)
+            self.live_scale += (scale_strength * 0.3) * math.sin(self.time_counter * 4.6)
+            self.head_tilt_deg += (0.45 * tilt_strength) * math.sin(self.time_counter * 3.8)
+            self.parallax_strength = parallax_strength + (0.9 * parallax_strength) * (0.5 + 0.5 * math.sin(self.time_counter * 3.4 + 0.3))
+
+        # Keep full-screen transparent overlay anchored; move avatar pose instead.
+        self.breathing_offset_y = new_y - self.base_y + (self.micro_jitter_y * self._jitter_decay)
+
+        # If this window is ever used in non-fullscreen mode, apply true geometry breathing.
+        screen = QApplication.primaryScreen().availableGeometry()
+        if self.width() < screen.width() or self.height() < screen.height():
+            g = self.geometry()
+            self.setGeometry(g.x(), int(new_y), g.width(), g.height())
+
+        self._position_status_label()
+
+    def _animation_tick(self):
+        # ── Sync string state → AnimationEngine enum ──
+        _state_map = {
+            "idle":      AvatarState.IDLE,
+            "listening": AvatarState.LISTENING,
+            "thinking":  AvatarState.THINKING,
+            "speaking":  AvatarState.SPEAKING,
+        }
+        self.anim_engine.set_state(_state_map.get(self.current_state, AvatarState.IDLE))
+
+        # ── Advance AnimationEngine one frame ──
+        self.anim_engine.tick()
+
+        # ── Sync compat aliases back into self for paintEvent ──
+        self.tick          = self.anim_engine._tick
+        self.breath_offset = self.anim_engine.breath_offset
+        self.lip_frame_index = self.anim_engine.lip_index
+
+        # ── Opacity smooth fade ──
         if abs(self.current_opacity - self.target_opacity) > 0.01:
             self.current_opacity += (self.target_opacity - self.current_opacity) * 0.1
             self.opacity_effect.setOpacity(self.current_opacity)
@@ -1133,11 +1129,12 @@ class SiaDesktop(QWidget):
                 self.last_active_time = time.time()
 
     def _canvas_box_rect(self) -> QRectF:
+        char_h = 600
         return QRectF(
             self.width() / 2 - CANVAS_BOX_W / 2,
-            self.height() / 2 - CANVAS_BOX_H / 2,
+            self.height() - char_h - 20 + self.breathing_offset_y,
             CANVAS_BOX_W,
-            CANVAS_BOX_H
+            char_h + 40
         )
 
     def _position_status_label(self):
@@ -1145,28 +1142,350 @@ class SiaDesktop(QWidget):
             return
         box_rect = self._canvas_box_rect()
         self.status_label.adjustSize()
+
+        status_y = int(box_rect.bottom() + (14 if self._compact_overlay_ui else 18))
+        max_bottom = self.height() - 6
+        if status_y + self.status_label.height() > max_bottom:
+            status_y = int(box_rect.top() - self.status_label.height() - 10)
+
         self.status_label.move(
             int(box_rect.center().x() - self.status_label.width() / 2),
-            int(box_rect.bottom() + 18)
+            status_y
         )
 
-    def _position_taskbar_dock(self):
-        if not hasattr(self, "taskbar_dock"):
-            return
-        screen = QApplication.primaryScreen().availableGeometry()
-        x = screen.left() + screen.width() - DOCK_W - 20
-        y = screen.top() + screen.height() - DOCK_H - 18
-        self.taskbar_dock.move(x, y)
+        if hasattr(self, "vision_mode_label") and self.vision_mode_label:
+            self.vision_mode_label.adjustSize()
+            gap = 4 if self._compact_overlay_ui else 8
+            vision_y = self.status_label.y() + self.status_label.height() + gap
+            if vision_y + self.vision_mode_label.height() > max_bottom:
+                vision_y = self.status_label.y() - self.vision_mode_label.height() - gap
+            self.vision_mode_label.move(
+                int(box_rect.center().x() - self.vision_mode_label.width() / 2),
+                vision_y
+            )
 
-    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    #  BUBBLE
-    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        if hasattr(self, "motion_mode_label") and self.motion_mode_label:
+            self.motion_mode_label.adjustSize()
+            gap = 4 if self._compact_overlay_ui else 6
+            anchor_y = self.vision_mode_label.y() + self.vision_mode_label.height() + gap if hasattr(self, "vision_mode_label") and self.vision_mode_label else self.status_label.y() + self.status_label.height() + gap
+            if anchor_y + self.motion_mode_label.height() > max_bottom:
+                anchor_y = self.status_label.y() - self.motion_mode_label.height() - gap
+            self.motion_mode_label.move(
+                int(box_rect.center().x() - self.motion_mode_label.width() / 2),
+                anchor_y
+            )
+
+    def _refresh_overlay_layout_mode(self):
+        compact = self.width() < 1280 or self.height() < 820
+        if compact == self._compact_overlay_ui:
+            return
+
+        self._compact_overlay_ui = compact
+        if compact:
+            self.status_label.setStyleSheet("""
+                QLabel {
+                    background: rgba(0, 0, 0, 170);
+                    color: #00FFCC;
+                    font-family: 'Segoe UI', sans-serif;
+                    font-size: 10px;
+                    padding: 3px 8px;
+                    border-radius: 9px;
+                    border: 1px solid rgba(0,255,204,0.28);
+                }
+            """)
+        else:
+            self._reset_status_style()
+
+        self._set_vision_badge({"mode": self._last_vision_mode})
+        self._update_motion_badge()
+
+    def _set_vision_badge(self, vision: dict):
+        mode = vision.get("mode", "cloud")
+        retry_seconds = int(vision.get("retry_seconds", 0) or 0)
+
+        if mode == "cloud":
+            text = "📷 Vision: Cloud"
+            color = "#00FFCC"
+            bg = "rgba(0, 40, 30, 165)"
+        else:
+            mins = max(1, retry_seconds // 60) if retry_seconds else 1
+            text = f"📷 Vision: Offline ({mins}m)"
+            color = "#FFD700"
+            bg = "rgba(45, 30, 0, 170)"
+
+        self.vision_mode_label.setText(text)
+        font_size = 9 if self._compact_overlay_ui else 10
+        pad = "2px 7px" if self._compact_overlay_ui else "3px 8px"
+        self.vision_mode_label.setStyleSheet(f"""
+            QLabel {{
+                background: {bg};
+                color: {color};
+                font-family: 'Segoe UI', sans-serif;
+                font-size: {font_size}px;
+                padding: {pad};
+                border-radius: 9px;
+                border: 1px solid {color}55;
+            }}
+        """)
+        self.vision_mode_label.adjustSize()
+        self._position_status_label()
+
+    def _update_motion_badge(self):
+        mode_short = {
+            "calm": "Calm",
+            "expressive": "Expressive",
+            "auto-switch": "Auto",
+        }.get(self.motion_mode, "Auto")
+        self.motion_mode_label.setText(f"🎬 Motion: {mode_short} | {int(self.realism_level)}%")
+
+        font_size = 9 if self._compact_overlay_ui else 10
+        pad = "2px 7px" if self._compact_overlay_ui else "3px 8px"
+        self.motion_mode_label.setStyleSheet(f"""
+            QLabel {{
+                background: rgba(18, 24, 42, 165);
+                color: #9AFBFF;
+                font-family: 'Segoe UI', sans-serif;
+                font-size: {font_size}px;
+                padding: {pad};
+                border-radius: 9px;
+                border: 1px solid rgba(154,251,255,0.32);
+            }}
+        """)
+        self.motion_mode_label.adjustSize()
+        self._position_status_label()
+
+    def _on_api_status_updated(self, status: dict):
+        vision = status.get("vision", {})
+        self._set_vision_badge(vision)
+
+        mode = vision.get("mode", "cloud")
+        if mode == self._last_vision_mode:
+            return
+
+        now = time.time()
+        if now - self._last_vision_notice_ts < 12:
+            self._last_vision_mode = mode
+            return
+
+        if mode == "fallback":
+            self._show_bubble(
+                "Sia ❤️: Vision cloud abhi limit/cooldown pe hai, main offline mode mein screen context de rahi hoon."
+            )
+            if self.current_state == "idle":
+                self._set_status("📷 Vision Offline Mode")
+        elif self._last_vision_mode == "fallback" and mode == "cloud":
+            self._show_bubble(
+                "Sia 💚: Vision cloud wapas online ho gaya! Ab full screen analysis auto-resume ho chuka hai."
+            )
+            if self.current_state == "idle":
+                self._set_status("💤 Say 'Sia'...")
+                self._reset_status_style()
+
+        self._last_vision_notice_ts = now
+        self._last_vision_mode = mode
 
     def _show_bubble(self, text):
         self.bubble_text          = text
         self.bubble_display_text  = ""
         self.typewriter_index     = 0
         self.typewriter_timer.start(28)
+
+    def _get_motion_profile(self):
+        if self.motion_mode == "auto-switch":
+            if self.current_state == "speaking":
+                return self.motion_profiles["expressive"]
+            if self.current_state in ("idle", "listening"):
+                return self.motion_profiles["calm"]
+        return self.motion_profiles.get(self.motion_mode, self.motion_profiles["auto-switch"])
+
+    def _load_motion_settings(self):
+        try:
+            if not os.path.exists(self._motion_settings_path):
+                return
+            with open(self._motion_settings_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+
+            mode = data.get("motion_mode", "auto-switch")
+            if mode in self.motion_profiles:
+                self.motion_mode = mode
+
+            level = int(data.get("realism_level", 78))
+            self.realism_level = max(0, min(100, level))
+        except Exception as e:
+            app_logger.warning(f"Could not load motion settings: {e}")
+
+    def _save_motion_settings(self):
+        try:
+            os.makedirs(CACHE_DIR, exist_ok=True)
+            data = {
+                "motion_mode": self.motion_mode,
+                "realism_level": int(self.realism_level),
+            }
+            with open(self._motion_settings_path, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=True, indent=2)
+        except Exception as e:
+            app_logger.warning(f"Could not save motion settings: {e}")
+
+    def _get_realism_multiplier(self) -> float:
+        # Maintain a baseline so motion never becomes completely dead at 0%.
+        return 0.35 + (self.realism_level / 100.0) * 0.95
+
+    def _open_realism_slider(self):
+        if self.realism_slider_window and self.realism_slider_window.isVisible():
+            self.realism_slider_window.close()
+            return
+
+        panel = QWidget(None, Qt.Tool | Qt.WindowStaysOnTopHint | Qt.WindowCloseButtonHint)
+        panel.setAttribute(Qt.WA_TranslucentBackground, True)
+        panel.setStyleSheet("""
+            QWidget {
+                background: rgba(8, 12, 24, 225);
+                border: 1px solid rgba(0,255,204,0.35);
+                border-radius: 12px;
+            }
+            QLabel {
+                color: #E8FFFC;
+                font-family: 'Segoe UI', sans-serif;
+            }
+            QSlider::groove:horizontal {
+                height: 7px;
+                background: rgba(255,255,255,0.14);
+                border-radius: 4px;
+            }
+            QSlider::sub-page:horizontal {
+                background: rgba(0,255,204,0.80);
+                border-radius: 4px;
+            }
+            QSlider::handle:horizontal {
+                width: 16px;
+                margin: -5px 0;
+                border-radius: 8px;
+                background: #00FFCC;
+                border: 1px solid rgba(255,255,255,0.55);
+            }
+        """)
+
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(12, 10, 12, 10)
+        layout.setSpacing(6)
+
+        title = QLabel("Realism Intensity")
+        title.setStyleSheet("font-size: 11px; font-weight: 600;")
+
+        self.realism_value_label = QLabel(f"{self.realism_level}%")
+        self.realism_value_label.setAlignment(Qt.AlignCenter)
+        self.realism_value_label.setStyleSheet("font-size: 12px; color: #00FFCC; font-weight: 700;")
+
+        slider = QSlider(Qt.Horizontal)
+        slider.setRange(0, 100)
+        slider.setValue(self.realism_level)
+        slider.valueChanged.connect(self._on_realism_changed)
+
+        tips = QLabel("0 = soft motion, 100 = cinematic")
+        tips.setStyleSheet("font-size: 9px; color: rgba(230,245,255,0.74);")
+        tips.setAlignment(Qt.AlignCenter)
+
+        layout.addWidget(title)
+        layout.addWidget(self.realism_value_label)
+        layout.addWidget(slider)
+        layout.addWidget(tips)
+
+        panel.resize(230, 108)
+        cursor_pos = QCursor.pos()
+        panel.move(cursor_pos.x() - 110, cursor_pos.y() - 125)
+        panel.destroyed.connect(lambda *_: self._on_realism_panel_closed())
+        panel.show()
+
+        self.realism_slider_window = panel
+        self._realism_autohide_timer.start(6000)
+
+    def _on_realism_changed(self, value: int):
+        self.realism_level = int(value)
+        if self.realism_value_label:
+            self.realism_value_label.setText(f"{self.realism_level}%")
+        self._update_motion_badge()
+        if self.current_state in ("idle", "listening"):
+            self._set_status(f"🎚 Realism: {self.realism_level}%")
+        self._save_motion_settings()
+        self._realism_autohide_timer.start(6000)
+
+    def _on_realism_panel_closed(self):
+        self.realism_slider_window = None
+        self.realism_value_label = None
+
+    def _auto_close_realism_slider(self):
+        if self.realism_slider_window and self.realism_slider_window.isVisible():
+            self.realism_slider_window.close()
+
+    def _set_motion_mode(self, mode: str):
+        if mode not in self.motion_profiles:
+            return
+        self.motion_mode = mode
+        self._update_motion_badge()
+        self._save_motion_settings()
+        mode_text = {
+            "calm": "🧘 Motion: Calm",
+            "expressive": "🔥 Motion: Expressive",
+            "auto-switch": "⚙️ Motion: Auto",
+        }.get(mode, "⚙️ Motion: Auto")
+        if self.current_state in ("idle", "listening"):
+            self._set_status(mode_text)
+        self._show_bubble(f"Sia 🎬: Motion profile switched to {mode} mode.")
+
+    def _reset_motion_settings(self):
+        self.motion_mode = "auto-switch"
+        self.realism_level = 78
+        if self.realism_value_label:
+            self.realism_value_label.setText(f"{self.realism_level}%")
+        self._update_motion_badge()
+        self._save_motion_settings()
+        if self.current_state in ("idle", "listening"):
+            self._set_status("♻ Motion reset to default")
+        self._show_bubble("Sia 🎬: Motion settings reset to default (Auto + 78%).")
+
+    def _reset_all_ui_settings(self):
+        self._reset_motion_settings()
+        self._compact_overlay_ui = False
+        self._refresh_overlay_layout_mode()
+        self._reset_status_style()
+
+        if self.realism_slider_window and self.realism_slider_window.isVisible():
+            self.realism_slider_window.close()
+
+        try:
+            if os.path.exists(self._tray_hint_path):
+                os.remove(self._tray_hint_path)
+        except Exception as e:
+            app_logger.warning(f"Could not reset tray hint marker: {e}")
+
+        if self.current_state in ("idle", "listening"):
+            self._set_status("🧼 UI reset complete")
+        self._show_bubble("Sia ⚙️: All UI settings reset. Next launch pe tray help hint phir dikhega.")
+
+    def _show_startup_self_check_toast(self):
+        checks = []
+        checks.append("Avatar OK" if self.character_pixmap and not self.character_pixmap.isNull() else "Avatar Missing")
+        checks.append("Blink OK" if self.blink_pixmap and not self.blink_pixmap.isNull() else "Blink Fallback")
+        checks.append("Lip-sync OK" if len(self.lip_pixmaps) >= 3 else "Lip-sync Partial")
+        checks.append("Wake Thread OK" if self.wake_thread and self.wake_thread.isRunning() else "Wake Thread Pending")
+
+        summary = " | ".join(checks)
+        try:
+            self.tray_icon.showMessage(
+                "Sia Startup Self-Check",
+                summary,
+                QSystemTrayIcon.Information,
+                4500
+            )
+        except Exception:
+            pass
+
+        app_logger.info(f"Startup self-check: {summary}")
+
+    def _show_panel(self):
+        """Side panel was removed; keep handler to avoid runtime attribute errors."""
+        if self.current_state in ("idle", "listening"):
+            self._set_status("⚙️ Use tray for controls")
 
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     #  STATUS LABEL HELPERS
@@ -1191,28 +1510,6 @@ class SiaDesktop(QWidget):
             }
         """)
 
-    def _open_whatsapp(self):
-        try:
-            from engine import os_automation
-            result = os_automation.open_whatsapp_web()
-        except Exception as e:
-            result = f"❌ WhatsApp open nahi hua: {e}"
-        self._show_bubble(f"Sia ❤️: {result}")
-        self._set_status("📱 WhatsApp")
-
-    def _open_work_mode(self):
-        try:
-            from engine import os_automation
-            result = os_automation.open_work_mode()
-        except Exception as e:
-            result = f"❌ Work mode start nahi hua: {e}"
-        self._show_bubble(f"Sia ❤️: {result}")
-        self._set_status("💼 Work Mode")
-
-    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    #  DRAG SUPPORT
-    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton:
             self._drag_pos = event.globalPos() - self.frameGeometry().topLeft()
@@ -1222,10 +1519,11 @@ class SiaDesktop(QWidget):
     def mouseMoveEvent(self, event):
         if event.buttons() == Qt.LeftButton and self._drag_pos is not None:
             self.move(event.globalPos() - self._drag_pos)
-            self._position_side_panel()
 
     def mouseReleaseEvent(self, event):
         self._drag_pos = None
+        self.base_y = self.y()
+        self._breathing_last_ts = time.time()
 
     def mouseDoubleClickEvent(self, event):
         self._show_panel()
@@ -1239,37 +1537,11 @@ class SiaDesktop(QWidget):
     #  PANEL POSITIONING
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-    def _position_side_panel(self):
-        """Place panel to the left of the avatar widget."""
-        box_rect = self._canvas_box_rect()
-        screen = QApplication.primaryScreen().availableGeometry()
-        px = int(box_rect.right() + 24)
-        py = int(box_rect.center().y() - PANEL_H / 2)
-        if px + PANEL_W > screen.right() - 8:
-            px = int(box_rect.left() - PANEL_W - 24)
-        px = max(screen.left() + 8, min(px, screen.right() - PANEL_W - 8))
-        py = max(screen.top() + 8, min(py, screen.bottom() - PANEL_H - 8))
-        self.side_panel.move(px, py)
-
-    def _show_panel(self):
-        self._position_side_panel()
-        self.side_panel.setWindowOpacity(1.0)
-        self.side_panel.show_panel()
-
-    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    #  VOICE PIPELINE
-    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-    def _on_wake_word(self):
+    def _on_seamless_text(self, text):
         self.last_active_time = time.time()
-        self.current_state    = "listening"
-        self._set_status("👂 Listening...")
-        self._show_bubble("Sia ❤️: Haan bolo Hero! 👂")
-
-        self.listen_thread = ListenThread()
-        self.listen_thread.text_recognized.connect(self._on_text_recognized)
-        self.listen_thread.listening_failed.connect(self._on_listen_failed)
-        self.listen_thread.start()
+        self._set_status("👂 Heard...")
+        self._show_bubble(f"Sia ❤️: Sun rahi hu... ({text[:10]}...)")
+        self._on_text_recognized(text)
 
     def _on_text_recognized(self, text):
         self.current_state = "thinking"
@@ -1278,14 +1550,55 @@ class SiaDesktop(QWidget):
         app_logger.info(f"🎤 Heard: {text}")
         memory.add_memory_log(f"Voice: {text}")
 
+        # ── Setup Streaming Pipeline ──
+        self.streaming_buffer = ""
+        
+        if hasattr(self, 'audio_stream_thread') and self.audio_stream_thread.isRunning():
+            self.audio_stream_thread.stop()
+            self.audio_stream_thread.wait()
+
+        self.audio_stream_thread = AudioStreamThread()
+        self.audio_stream_thread.start()
+
         self.think_thread = ThinkThread(text)
+        self.think_thread.chunk_ready.connect(self._on_chunk_ready)
         self.think_thread.response_ready.connect(self._on_response_ready)
         self.think_thread.start()
 
+    def _on_chunk_ready(self, chunk):
+        # Stop typewriter, render instantly (Zero Latency UI)
+        self.typewriter_timer.stop()
+        if self.current_state == "thinking" or not getattr(self, 'bubble_display_text', '').startswith("Sia"):
+             self.bubble_display_text = "Sia 🧡: "
+             self.current_state = "speaking"
+             self._set_status("🧡 Speaking")
+        
+        # Clean control tags
+        clean_chunk = re.sub(r'\[.*?\]', '', chunk)
+        if not clean_chunk:
+            return
+            
+        self.bubble_display_text += clean_chunk
+        self.update()
+
+        # Buffer for sentence-by-sentence TTS
+        self.streaming_buffer += clean_chunk
+        if any(p in self.streaming_buffer for p in ['. ', '? ', '! ', ', ', '\n']) or len(self.streaming_buffer) > 40:
+            if self.streaming_buffer.strip():
+                self.audio_stream_thread.enqueue(self.streaming_buffer.strip())
+            self.streaming_buffer = ""
+
     def _on_response_ready(self, response):
+        # Flush remaining chunks
+        if getattr(self, 'streaming_buffer', "").strip():
+            self.audio_stream_thread.enqueue(self.streaming_buffer.strip())
+            self.streaming_buffer = ""
+        if hasattr(self, 'audio_stream_thread'):
+            self.audio_stream_thread.enqueue("<STOP>")
+
         if response.strip() == "[IGNORE]":
             self.current_state = "idle"
-            self._set_status("💤 Say 'Sia'...")
+            self._set_status("👂 Listening...")
             self._reset_status_style()
             if self.wake_thread and self.wake_thread.isRunning():
                 self.wake_thread.resume()
@@ -1355,18 +1668,26 @@ class SiaDesktop(QWidget):
         self.last_active_time = time.time()
         self._load_character("IDLE")
         self.current_state    = "idle"
-        self._set_status("💤 Say 'Sia'...")
+        self._set_status("👂 Listening...")
         self._reset_status_style()
         if self.wake_thread and self.wake_thread.isRunning():
             self.wake_thread.resume()
 
-    def _on_listen_failed(self):
-        self.current_state = "idle"
-        self._set_status("💤 Say 'Sia'...")
-        self._reset_status_style()
-        self._show_bubble("Sia ❤️: Kuch sunayi nahi diya... Dobara bolo Hero! 😊")
-        if self.wake_thread and self.wake_thread.isRunning():
-            self.wake_thread.resume()
+    def _on_user_interrupt(self):
+        """Called by VAD monitor when user speaks while Sia is talking — instant silence!"""
+        if self.current_state != "speaking":
+            return
+        app_logger.info("[Interrupt] User spoke — Sia silenced.")
+        voice_engine.stop()
+
+        # Stop AudioStreamThread cleanly
+        if hasattr(self, 'audio_stream_thread') and self.audio_stream_thread.isRunning():
+            self.audio_stream_thread.stop()
+
+        self.current_state = "listening"
+        self._set_status("👂 Suno kya bola...")
+        self._show_bubble("Sia 👂: Ha bolo, main sun rahi hoon...")
+        self.update()
 
     def _on_status_change(self, status):
         pass   # handled by _on_wake_word
@@ -1375,71 +1696,13 @@ class SiaDesktop(QWidget):
     #  MANUAL / PANEL ACTIONS
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-    def _manual_voice_input(self):
+    def _run_proactive_vision_loop(self):
         if self.current_state != "idle":
             return
-        if self.wake_thread and self.wake_thread.isRunning():
-            self.wake_thread.paused = True
-        self.current_state = "listening"
-        self._set_status("👂 Listening...")
-        self._show_bubble("Sia ❤️: Bol Hero! 🎤")
-
-        self.listen_thread = ListenThread()
-        self.listen_thread.text_recognized.connect(self._on_text_recognized)
-        self.listen_thread.listening_failed.connect(self._on_listen_failed)
-        self.listen_thread.start()
-
-    def _vision_screen(self):
-        if self.current_state != "idle":
-            return
-        self.current_state = "thinking"
-        self._set_status("📷 Analyzing screen...")
-        self._show_bubble("Sia ❤️: Screen dekh rahi hoon... 📷")
-
-        self.vision_thread = VisionThread(
-            question="Meri screen pe kya hai? Error hai toh batao.", mode="screen"
-        )
-        self.vision_thread.result_ready.connect(self._on_vision_result)
-        self.vision_thread.start()
-
-    def _on_vision_result(self, result):
-        self._on_response_ready(result)
-
-    def _start_search(self):
-        if self.current_state != "idle":
-            return
-        if self.wake_thread and self.wake_thread.isRunning():
-            self.wake_thread.paused = True
-        self.current_state = "listening"
-        self._set_status("🔍 Bol: Kya search karoon?")
-        self._show_bubble("Sia ❤️: Kya search karna hai? Bolo! 🔍")
-
-        self.listen_thread = ListenThread()
-        self.listen_thread.text_recognized.connect(self._on_search_query)
-        self.listen_thread.listening_failed.connect(self._on_listen_failed)
-        self.listen_thread.start()
-
-    def _on_search_query(self, text):
-        self.current_state = "thinking"
-        self._set_status("🔍 Searching...")
-        self._show_bubble(f"🔍 Searching: {text}")
-
-        self.search_thread = WebSearchThread(text)
-        self.search_thread.result_ready.connect(self._on_search_result)
-        self.search_thread.start()
-
-    def _on_search_result(self, result):
-        display = result[:450] + "..." if len(result) > 450 else result
-        self._show_bubble(f"Sia ❤️: {display}")
-        self.current_state = "idle"
-        self._set_status("💤 Say 'Sia'...")
-        self._reset_status_style()
-        if self.wake_thread and self.wake_thread.isRunning():
-            self.wake_thread.resume()
-
-    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    #  PROACTIVE ENGINE CALLBACKS
-    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        app_logger.info("Starting 5-minute proactive vision loop...")
+        self.proactive_vision_thread = ProactiveVisionThread()
+        self.proactive_vision_thread.result_ready.connect(self._proactive_speak)
+        self.proactive_vision_thread.start()
 
     def _proactive_speak(self, message):
         if self.current_state != "idle":
@@ -1480,6 +1743,7 @@ class SiaDesktop(QWidget):
             self.setVisible(not self.isVisible())
 
     def _quit_app(self):
+        self._save_motion_settings()
         if self.wake_thread:
             self.wake_thread.stop()
             self.wake_thread.wait(2000)
@@ -1529,7 +1793,20 @@ def main():
         print("═" * 55 + "\n")
 
         sia = SiaDesktop()
-        sys.exit(app.exec_())
+
+        smoke_seconds_raw = os.getenv("SIA_SMOKE_SECONDS", "").strip()
+        if smoke_seconds_raw:
+            try:
+                smoke_seconds = max(1.0, float(smoke_seconds_raw))
+            except ValueError:
+                smoke_seconds = 8.0
+            QTimer.singleShot(int(smoke_seconds * 1000), lambda: os._exit(0))
+            print(f"[Smoke Mode] Auto-exit in {smoke_seconds:.1f}s")
+
+        exit_code = app.exec_()
+        if smoke_seconds_raw:
+            sys.exit(0)
+        sys.exit(exit_code)
 
     except Exception as e:
         print(f"❌ Fatal: {e}")

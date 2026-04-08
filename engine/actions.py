@@ -603,7 +603,10 @@ def perform_action(command_text: str) -> Optional[str]:
 
     # ── FACTORY-BASED ACTION HANDLING ──
     # Vision actions
-    if any(kw in cmd for kw in ["screen dekho", "screen pe kya", "screen dikha", "meri screen", "screenshot"]):
+    if any(kw in cmd for kw in [
+        "screen dekho", "screen pe kya", "screen dikha", "meri screen", "screenshot",
+        "desktop dekho", "desktop dekh", "desktop pe kya", "meri desktop", "desktop dikha"
+    ]):
         return action_handler.execute("vision_screen", command_text)
 
     if any(kw in cmd for kw in ["camera", "webcam", "kya dikh raha", "mujhe dekho"]):

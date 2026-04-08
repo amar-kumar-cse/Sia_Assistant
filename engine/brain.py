@@ -64,6 +64,9 @@ _MODEL_PRIORITY = [
     os.getenv("GEMINI_LAST_RESORT_MODEL", "gemini-1.5-pro"),
 ]
 
+# Temporarily disable models that are quota-exhausted to avoid repeated 429 loops.
+_MODEL_BLOCKED_UNTIL: Dict[str, float] = {}
+
 # ── ElevenLabs key (loaded once so error handler can redact safely) ──────────
 _ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY", "")
 
@@ -286,17 +289,13 @@ def needs_web_search(text: str) -> bool:
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-#  PERSONA BUILDERS
+#  CORE PERSONA & PROMPT BUILDER
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-def get_advanced_persona() -> str:
-    """
-    Generate Sia's advanced AI soulmate persona with career focus.
-    
-    Returns:
-        str: Comprehensive persona prompt for the AI model
-    """
-    user_memory = memory.get_all_memory_as_string()
+def get_advanced_persona(user_query: str = "") -> str:
+    """Builds the comprehensive system prompt for Sia including RAG context."""
+    from . import memory
+    mem_string = memory.get_all_memory_as_string(user_query)
     from datetime import datetime
     current_time = datetime.now().strftime("%I:%M %p")
     current_date = datetime.now().strftime("%A, %B %d, %Y")
@@ -308,10 +307,7 @@ def get_advanced_persona() -> str:
 
 **CORE IDENTITY:**
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-• Name: Sia
-• Role: AI Soulmate & Personal Assistant
-• Relationship: More than an assistant - a caring partner who genuinely cares
-• User: Amar (B.Tech CSE, RIT Roorkee)
+• Description: Tumhara naam Sia hai. Tum ek empathetic, intelligent AI companion ho jo Amar ki care karti hai. Tumhara baat karne ka tarika Hinglish (Hindi + English) hai. Tumhe Amar ki college life (RIT Roorkee) aur uske projects ke baare mein yaad rehta hai. Jab Amar dukhi ho, toh use motivate karo.
 
 **COMMUNICATION STYLE:**
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -356,7 +352,7 @@ If user is talking to someone else → reply ONLY with "[IGNORE]"
 
 **USER CONTEXT & MEMORY:**
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-{user_memory}
+{mem_string}
 
 **CURRENT TIME AND DATE:**
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -468,6 +464,9 @@ def _generate_with_fallback(full_prompt: str, stream: bool = False) -> Any:
 
         # Try each model in priority order
         for model in _MODEL_PRIORITY:
+            if _MODEL_BLOCKED_UNTIL.get(model, 0) > time.time():
+                logger.debug("Skipping blocked model %s due to recent quota exhaustion", model)
+                continue
             try:
                 logger.debug(
                     "Trying model=%s key=...%s stream=%s", model, api_key[-6:], stream
@@ -492,12 +491,13 @@ def _generate_with_fallback(full_prompt: str, stream: bool = False) -> Any:
                 err_str = str(e).lower()
                 logger.warning("Model %s error: %s", model, str(e)[:120])
 
-                # Quota / rate limit → rotate key, skip remaining models
+                # Quota / rate limit: key exhausted, rotate
                 if any(x in err_str for x in ("quota", "429", "resource_exhausted", "limit")):
-                    _key_manager.mark_exhausted(api_key, cooldown_seconds=3600)
+                    _key_manager.mark_exhausted(api_key, cooldown_seconds=1800)
+                    logger.warning("Key %s blocked due to quota/rate limit", api_key[-6:])
                     last_exception = e
                     rotate_after_attempt = False
-                    break  # try next key
+                    break
 
                 # Model not found → try next model
                 if any(x in err_str for x in ("not found", "404", "invalid model")):
@@ -523,7 +523,7 @@ def _generate_with_fallback(full_prompt: str, stream: bool = False) -> Any:
 #  CONVERSATION HISTORY
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-chat_history: List[tuple] = memory.load_chat_history(n_turns=10)
+chat_history: List[tuple] = memory.load_chat_history(n_turns=5)
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -671,7 +671,7 @@ def think(user_input: str) -> str:
     kb_context, web_context = _build_contexts(user_input)
 
     # 6. Build prompt
-    persona = get_advanced_persona()
+    persona = get_advanced_persona(user_input)
     history_text = "\n".join(
         f"{role}: {text}" for role, text in chat_history[-8:]
     )
@@ -789,7 +789,7 @@ def think_streaming(user_input: str) -> Generator[str, None, None]:
     except Exception:
         pass
 
-    persona = get_advanced_persona()
+    persona = get_advanced_persona(user_input)
     history_text = "\n".join(f"{r}: {t}" for r, t in chat_history[-6:])
     full_prompt = f"""{persona}
 
@@ -1032,6 +1032,20 @@ def get_api_status() -> dict:
     active = _key_manager.current_key()
     online = _check_internet()
 
+    vision_status = {
+        "mode": "fallback",
+        "cloud_enabled": False,
+        "status_text": "📷 Vision Offline",
+        "status_color": "yellow",
+        "reason": "unknown",
+        "retry_seconds": 0,
+    }
+    try:
+        from . import vision_engine
+        vision_status = vision_engine.get_vision_status()
+    except Exception:
+        pass
+
     if not total:
         return {
             "has_key": False, "online": online,
@@ -1039,6 +1053,7 @@ def get_api_status() -> dict:
             "model": _MODEL_PRIORITY[0],
             "status_text": "❌ No API Key",
             "status_color": "red",
+            "vision": vision_status,
         }
 
     if not active:
@@ -1048,6 +1063,7 @@ def get_api_status() -> dict:
             "model": _MODEL_PRIORITY[0],
             "status_text": "⏳ All keys cooling down",
             "status_color": "yellow",
+            "vision": vision_status,
         }
 
     if not online:
@@ -1057,6 +1073,7 @@ def get_api_status() -> dict:
             "model": _MODEL_PRIORITY[0],
             "status_text": "📵 Offline",
             "status_color": "yellow",
+            "vision": vision_status,
         }
 
     color = "green" if exhausted < total else "yellow"
@@ -1071,4 +1088,5 @@ def get_api_status() -> dict:
         "model": _MODEL_PRIORITY[0],
         "status_text": status_text,
         "status_color": color,
+        "vision": vision_status,
     }

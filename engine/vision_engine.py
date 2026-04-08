@@ -3,21 +3,48 @@ import tempfile
 import time
 import atexit
 import glob
+import ctypes
 from typing import Optional, Tuple
-from google import genai
-from google.genai import types
 from PIL import Image
 from dotenv import load_dotenv
 
+try:
+    from google import genai
+except ImportError:
+    genai = None
+
 load_dotenv()
 
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+def _load_all_api_keys() -> list[str]:
+    keys: list[str] = []
+    base = os.getenv("GEMINI_API_KEY", "")
+    for part in base.split(","):
+        key = part.strip()
+        if key and "your_" not in key.lower() and len(key) > 10:
+            keys.append(key)
+    for i in range(2, 6):
+        extra = os.getenv(f"GEMINI_API_KEY_{i}", "").strip()
+        if extra and "your_" not in extra.lower() and len(extra) > 10:
+            keys.append(extra)
+    return keys
 
-if GEMINI_API_KEY:
-    client = genai.Client(api_key=GEMINI_API_KEY)
-else:
-    client = None
-    print("⚠️  Vision Engine: GEMINI_API_KEY not found")
+
+_VISION_MODELS = [
+    os.getenv("GEMINI_VISION_PRIMARY_MODEL", "gemini-1.5-flash"),
+    os.getenv("GEMINI_VISION_FALLBACK_MODEL", "gemini-1.5-pro"),
+    os.getenv("GEMINI_VISION_LAST_MODEL", "gemini-2.0-flash"),
+]
+
+_VISION_KEYS = _load_all_api_keys()
+_VISION_KEY_BLOCKED_UNTIL: dict[str, float] = {}
+_VISION_MODEL_BLOCKED_UNTIL: dict[str, float] = {}
+_VISION_COOLDOWN_SECONDS = 1800
+_MODEL_NOT_FOUND_COOLDOWN_SECONDS = 21600
+
+if not genai:
+    print("⚠️ Vision Engine: google-genai package not installed")
+elif not _VISION_KEYS:
+    print("⚠️ Vision Engine: GEMINI_API_KEY not found")
 
 def _cleanup_temp_files():
     """Clean up temporary screenshot files on exit."""
@@ -32,6 +59,113 @@ def _cleanup_temp_files():
         pass
 
 atexit.register(_cleanup_temp_files)
+
+
+def _is_quota_error(error: Exception) -> bool:
+    err = str(error).lower()
+    return any(x in err for x in ("429", "resource_exhausted", "quota", "rate limit"))
+
+
+def _is_model_not_found_error(error: Exception) -> bool:
+    err = str(error).lower()
+    return "404" in err or "not found" in err or "unsupported model" in err
+
+
+def _seconds_until_next_vision_retry(now: Optional[float] = None) -> int:
+    now = now or time.time()
+    times = [ts for ts in _VISION_KEY_BLOCKED_UNTIL.values() if ts > now]
+    if not times:
+        return 0
+    return max(0, int(min(times) - now))
+
+
+def get_vision_status() -> dict:
+    """
+    Returns current cloud-vision health for UI.
+    mode: cloud | fallback
+    """
+    now = time.time()
+
+    if not genai:
+        return {
+            "mode": "fallback",
+            "cloud_enabled": False,
+            "status_text": "📷 Vision Offline (SDK missing)",
+            "status_color": "red",
+            "reason": "sdk_missing",
+            "retry_seconds": 0,
+        }
+
+    if not _VISION_KEYS:
+        return {
+            "mode": "fallback",
+            "cloud_enabled": False,
+            "status_text": "📷 Vision Offline (No key)",
+            "status_color": "red",
+            "reason": "no_key",
+            "retry_seconds": 0,
+        }
+
+    available_keys = [k for k in _VISION_KEYS if _VISION_KEY_BLOCKED_UNTIL.get(k, 0) <= now]
+    if available_keys:
+        return {
+            "mode": "cloud",
+            "cloud_enabled": True,
+            "status_text": "📷 Vision Cloud Ready",
+            "status_color": "green",
+            "reason": "ok",
+            "retry_seconds": 0,
+        }
+
+    retry_seconds = _seconds_until_next_vision_retry(now)
+    mins = max(1, retry_seconds // 60) if retry_seconds else 1
+    return {
+        "mode": "fallback",
+        "cloud_enabled": False,
+        "status_text": f"📷 Vision Offline ({mins}m)",
+        "status_color": "yellow",
+        "reason": "quota_cooldown",
+        "retry_seconds": retry_seconds,
+    }
+
+
+def _active_window_title() -> str:
+    """Best-effort active window title for local fallback context."""
+    try:
+        user32 = ctypes.windll.user32
+        hwnd = user32.GetForegroundWindow()
+        if not hwnd:
+            return "Unknown window"
+        length = user32.GetWindowTextLengthW(hwnd)
+        buff = ctypes.create_unicode_buffer(length + 1)
+        user32.GetWindowTextW(hwnd, buff, length + 1)
+        title = buff.value.strip()
+        return title if title else "Unknown window"
+    except Exception:
+        return "Unknown window"
+
+
+def _local_screen_fallback(image_path: str) -> str:
+    """Fallback when cloud vision is unavailable due quota/network."""
+    try:
+        img = Image.open(image_path)
+        w, h = img.size
+    except Exception:
+        w, h = (0, 0)
+    title = _active_window_title()
+    return (
+        f"[CONFUSED] API limit hit ho gayi, full visual analysis abhi possible nahi hai. "
+        f"Lekin active window '{title}' dikh rahi hai, screen size approx {w}x{h}. "
+        "Chaaho toh main error text/stacktrace paste karne pe turant fix de dungi."
+    )
+
+
+def _safe_remove(path: str):
+    try:
+        if path and os.path.exists(path):
+            os.remove(path)
+    except Exception:
+        pass
 
 
 def capture_screen() -> Optional[str]:
@@ -129,9 +263,12 @@ def capture_webcam() -> Optional[str]:
 
 def analyze_image(image_path: str, question: str = "Is mein kya dikh raha hai? Describe in Hinglish.") -> str:
     """
-    Analyzes an image using Gemini 2.0 Flash multimodal API.
+    Analyzes an image using Gemini multimodal API with key/model fallback.
     """
-    if not client:
+    if not genai:
+        return "Arre Hero, vision engine setup missing hai (google-genai install karo)! 😅"
+
+    if not _VISION_KEYS:
         return "Arre Hero, vision ke liye GEMINI_API_KEY chahiye! 😅"
     
     if not image_path or not os.path.exists(image_path):
@@ -155,20 +292,50 @@ User's question: {question}
 
 Respond as Sia in Hinglish:"""
 
-        # Send image + text to Gemini (using new google-genai SDK)
-        response = client.models.generate_content(
-            model='gemini-2.0-flash',
-            contents=[vision_prompt, img]
-        )
-        
-        result = response.text.strip()
+        # Multi-key + multi-model fallback to avoid vision downtime on quota hits.
+        result: Optional[str] = None
+        last_error: Optional[Exception] = None
+        now = time.time()
+
+        available_keys = [k for k in _VISION_KEYS if _VISION_KEY_BLOCKED_UNTIL.get(k, 0) <= now]
+        if not available_keys:
+            fallback = _local_screen_fallback(image_path)
+            _safe_remove(image_path)
+            return fallback
+
+        for key in available_keys:
+            client = genai.Client(api_key=key)
+            for model in _VISION_MODELS:
+                if _VISION_MODEL_BLOCKED_UNTIL.get(model, 0) > time.time():
+                    continue
+                try:
+                    response = client.models.generate_content(
+                        model=model,
+                        contents=[vision_prompt, img]
+                    )
+                    if response and getattr(response, "text", None):
+                        result = response.text.strip()
+                        break
+                except Exception as model_error:
+                    last_error = model_error
+                    if _is_quota_error(model_error):
+                        _VISION_KEY_BLOCKED_UNTIL[key] = time.time() + _VISION_COOLDOWN_SECONDS
+                        _VISION_MODEL_BLOCKED_UNTIL[model] = time.time() + _VISION_COOLDOWN_SECONDS
+                    elif _is_model_not_found_error(model_error):
+                        _VISION_MODEL_BLOCKED_UNTIL[model] = time.time() + _MODEL_NOT_FOUND_COOLDOWN_SECONDS
+                    continue
+            if result:
+                break
+
+        if not result:
+            fallback = _local_screen_fallback(image_path)
+            _safe_remove(image_path)
+            return fallback
+
         print(f"👁️ Vision analysis complete")
         
         # Clean up temp image
-        try:
-            os.remove(image_path)
-        except:
-            pass
+        _safe_remove(image_path)
         
         return result
         

@@ -5,6 +5,7 @@ Routes to the maintained desktop entrypoint.
 
 import os
 import sys
+import argparse
 
 
 # Set UTF-8 encoding for Windows console
@@ -22,5 +23,20 @@ if sys.platform == "win32":
 from sia_desktop import main
 
 
+def _parse_args():
+    parser = argparse.ArgumentParser(description="Launch Sia desktop assistant")
+    parser.add_argument(
+        "--smoke",
+        nargs="?",
+        const="8",
+        metavar="SECONDS",
+        help="Run startup smoke check and auto-exit cleanly after N seconds (default: 8)",
+    )
+    return parser.parse_args()
+
+
 if __name__ == "__main__":
+    args = _parse_args()
+    if args.smoke is not None:
+        os.environ["SIA_SMOKE_SECONDS"] = str(args.smoke)
     main()

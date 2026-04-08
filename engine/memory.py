@@ -275,11 +275,11 @@ def update_file_path(file_key: str, path: str) -> None:
     memory["files"][file_key] = path
     save_memory(memory)
 
-def get_all_memory_as_string() -> str:
-    """Formats all memory + user facts as a readable string for AI context (with caching)."""
+def get_all_memory_as_string(query: str = "") -> str:
+    """Formats all memory + user facts as a readable string for AI context (with caching unless query is provided)."""
     global _context_cache, _cache_timestamp
     
-    if _context_cache is not None and _cache_timestamp:
+    if not query and _context_cache is not None and _cache_timestamp:
         if time.time() - _cache_timestamp < 10:
             return _context_cache
     
@@ -314,9 +314,9 @@ def get_all_memory_as_string() -> str:
             memory_str += f"  - [{log['timestamp']}] {log['entry']}\n"
 
     # NEW: Include dynamically learned user facts
-    facts = get_recent_facts(15)
+    facts = search_facts(query, 5) if query else get_recent_facts(15)
     if facts:
-        memory_str += "\nThings User Has Said / Facts I've Learned:\n"
+        memory_str += "\nContext-Relevant Facts About User:\n" if query else "\nThings User Has Said / Facts I've Learned:\n"
         for fact in facts:
             memory_str += f"  - {fact}\n"
 
@@ -389,6 +389,30 @@ def get_recent_facts(n: int = 15) -> List[str]:
     except Exception as e:
         print(f"[Sia Memory] Error getting facts: {e}")
         return []
+
+def search_facts(query: str, limit: int = 5) -> List[str]:
+    """Finds relevant past facts using keyword matching (Simulated Vector Search)."""
+    stopwords = {"hai", "aur", "the", "a", "is", "of", "to", "in", "and", "mein", "ko", "ki", "kya", "kyu"}
+    keywords = [word for word in query.lower().split() if word not in stopwords and len(word) > 2]
+    
+    if not keywords:
+        return get_recent_facts(limit)
+        
+    try:
+        with _db_lock, _get_db() as conn:
+            conditions = " OR ".join(["fact LIKE ?" for _ in keywords])
+            params = [f"%{k}%" for k in keywords]
+            
+            sql = f"SELECT fact FROM user_facts WHERE {conditions} ORDER BY id DESC LIMIT ?"
+            params.append(limit)
+            
+            rows = conn.execute(sql, params).fetchall()
+            if not rows:
+                 return get_recent_facts(limit)
+            return [row["fact"] for row in rows]
+    except Exception as e:
+        print(f"[Sia Memory] Error searching facts: {e}")
+        return get_recent_facts(limit)
 
 
 def forget_fact(fact_text: str) -> bool:
