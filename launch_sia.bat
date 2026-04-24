@@ -13,10 +13,10 @@ REM Navigate to script directory
 cd /d "%~dp0"
 
 echo.
-echo  ╔══════════════════════════════════════╗
-echo  ║  🎀 SIA - Desktop AI Assistant      ║
-echo  ║  ❤️  Your Personal AI Companion      ║
-echo  ╚══════════════════════════════════════╝
+echo  ========================================
+echo    SIA - Desktop AI Assistant
+echo    Your Personal AI Companion
+echo  ========================================
 echo.
 
 REM Check virtual environment

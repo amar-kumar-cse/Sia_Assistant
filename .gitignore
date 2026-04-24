@@ -88,3 +88,6 @@ backups/
 *.exe
 *.app
 *.dmg
+temp/
+scratch/
+cache/

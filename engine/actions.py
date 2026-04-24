@@ -9,13 +9,54 @@ import webbrowser
 import os
 import subprocess
 import platform
+import time
 from . import memory
 import urllib.parse
 from .logger import get_logger
-from typing import Optional, Dict, List, Any
+from typing import Optional, Dict, List, Any, Callable
 from .action_handler import action_handler
 
 logger = get_logger(__name__)
+
+
+_pending_confirmation: Dict[str, Any] = {
+    "action": None,
+    "label": "",
+    "expires_at": 0.0,
+}
+
+
+def _queue_confirmation(label: str, action: Callable[[], str], ttl_seconds: int = 30) -> str:
+    _pending_confirmation["action"] = action
+    _pending_confirmation["label"] = label
+    _pending_confirmation["expires_at"] = time.time() + ttl_seconds
+    return (
+        f"⚠️ Safety check: '{label}' execute karne se system/repo state change hoga. "
+        "Confirm karne ke liye bolo: confirm now. Cancel ke liye bolo: cancel."
+    )
+
+
+def _consume_confirmation(confirm: bool) -> Optional[str]:
+    action = _pending_confirmation.get("action")
+    label = _pending_confirmation.get("label", "")
+    expires_at = float(_pending_confirmation.get("expires_at", 0.0) or 0.0)
+
+    if not action:
+        return None
+
+    if time.time() > expires_at:
+        _pending_confirmation["action"] = None
+        _pending_confirmation["label"] = ""
+        _pending_confirmation["expires_at"] = 0.0
+        return "⌛ Previous confirmation request expired. Command dobara do."
+
+    _pending_confirmation["action"] = None
+    _pending_confirmation["label"] = ""
+    _pending_confirmation["expires_at"] = 0.0
+
+    if not confirm:
+        return f"✅ Cancelled: {label}"
+    return action()
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #  ORIGINAL ACTIONS (preserved)
@@ -573,6 +614,31 @@ def perform_action(command_text: str) -> Optional[str]:
 
     cmd = command_text.lower()
 
+    try:
+        from . import validation
+        policy = validation.get_command_policy(command_text)
+        if policy.get("risk") == "DENY":
+            return f"❌ {policy.get('reason')}"
+    except Exception as e:
+        logger.warning("Validation policy check skipped: %s", e)
+
+    # ── Explicit confirmation flow ──
+    if any(kw in cmd for kw in ["confirm now", "yes confirm", "confirm", "haan confirm"]):
+        confirmed = _consume_confirmation(confirm=True)
+        if confirmed is not None:
+            return confirmed
+    if any(kw in cmd for kw in ["cancel", "mat karo", "cancel karo"]):
+        cancelled = _consume_confirmation(confirm=False)
+        if cancelled is not None:
+            return cancelled
+
+    # ── Hard deny-list for risky v1 actions ──
+    if any(kw in cmd for kw in [
+        "download and run", "download-run", "remote script execute", "registry persist",
+        "show api key", "show token", "extract password", "credential dump"
+    ]):
+        return "❌ Safety policy: Yeh action v1 mein permanently disabled hai."
+
     # ── MOOD DETECTION (highest priority for personal touch) ──
     mood_result = _handle_mood_detection(cmd)
     if mood_result:
@@ -587,17 +653,33 @@ def perform_action(command_text: str) -> Optional[str]:
         logger.warning(f"Code repair check failed: {e}")
 
     # ── ADVANCED AUTOMATION COMMANDS (GIT & VENV) ──
+    if any(kw in cmd for kw in ["git status", "git log", "git diff", "git branch", "git remote"]):
+        try:
+            from . import dev_tools
+            if "git status" in cmd:
+                return dev_tools.run_safe_git("status")
+            if "git log" in cmd:
+                return dev_tools.run_safe_git("log")
+            if "git diff" in cmd:
+                return dev_tools.run_safe_git("diffstat")
+            if "git branch" in cmd:
+                return dev_tools.run_safe_git("branch")
+            if "git remote" in cmd:
+                return dev_tools.run_safe_git("remote")
+        except Exception as e:
+            return f"❌ Safe git error: {e}"
+
     if any(kw in cmd for kw in ["git push", "commit code", "save code", "code push", "github pe push"]):
         try:
             from . import dev_tools
-            return dev_tools.git_commit_push()
+            return _queue_confirmation("git add/commit/push", lambda: dev_tools.git_commit_push(require_confirmation=False))
         except Exception as e:
             return f"❌ Git automation error: {e}"
 
     if any(kw in cmd for kw in ["setup project", "environment setup", "venv banao", "install requirements"]):
         try:
             from . import dev_tools
-            return dev_tools.setup_python_env()
+            return _queue_confirmation("python environment setup", lambda: dev_tools.setup_python_env(require_confirmation=False))
         except Exception as e:
             return f"❌ Environment setup error: {e}"
 
@@ -640,21 +722,24 @@ def perform_action(command_text: str) -> Optional[str]:
             import re
             numbers = re.findall(r'\d+', cmd)
             mins = int(numbers[0]) if numbers else 0
-            return os_automation.shutdown_timer(mins)
+            return _queue_confirmation(
+                f"shutdown in {mins} minute(s)",
+                lambda: os_automation.shutdown_timer(mins),
+            )
         except Exception as e:
             return f"❌ Shutdown failed: {e}"
 
     if "restart" in cmd or "reboot" in cmd:
         try:
             from . import os_automation
-            return os_automation.restart_system()
+            return _queue_confirmation("system restart", os_automation.restart_system)
         except Exception as e:
             return f"❌ Restart failed: {e}"
 
     if "sleep" in cmd and any(kw in cmd for kw in ["mode", "pc", "laptop", "system", "computer"]):
         try:
             from . import os_automation
-            return os_automation.sleep_system()
+            return _queue_confirmation("system sleep", os_automation.sleep_system)
         except Exception as e:
             return f"❌ Sleep failed: {e}"
 
@@ -678,23 +763,30 @@ def perform_action(command_text: str) -> Optional[str]:
     if any(kw in cmd for kw in ["recycle bin", "trash", "dustbin"]):
         try:
             from . import os_automation
-            return os_automation.empty_recycle_bin()
+            return _queue_confirmation("empty recycle bin", os_automation.empty_recycle_bin)
         except Exception as e:
             logger.warning(f"Recycle bin empty failed: {e}")
 
     if any(kw in cmd for kw in ["temp file", "temporary file", "temp clean", "temp saaf"]):
         try:
             from . import os_automation
-            return os_automation.clear_temp_files()
+            return _queue_confirmation("clear temp files", os_automation.clear_temp_files)
         except Exception as e:
             logger.warning(f"Temp file cleanup failed: {e}")
 
     if any(kw in cmd for kw in ["email", "mail likho", "email draft"]):
         try:
             from . import dev_tools
-            return dev_tools.draft_email()
+            return _queue_confirmation("open email draft", lambda: dev_tools.draft_email(require_confirmation=False))
         except Exception as e:
             logger.warning(f"Email draft failed: {e}")
+
+    if any(kw in cmd for kw in ["wipe memory", "clear memory all", "sab memory delete", "forget everything"]):
+        return _queue_confirmation("wipe all memory", memory.wipe_all_memory)
+
+    if any(kw in cmd for kw in ["average response time", "response time this week", "kitna fast hai"]):
+        avg = memory.get_average_response_time_this_week()
+        return f"📊 Is week average response time: {avg:.3f}s"
 
     # Smart app opener (check after specific commands to avoid false matches)
     if any(kw in cmd for kw in ["kholo", "open ", "launch", "start ", "chalu"]):

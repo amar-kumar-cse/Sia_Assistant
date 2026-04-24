@@ -9,6 +9,7 @@ import sys
 import subprocess
 import platform
 import shutil
+import getpass
 import ctypes
 import time
 import tempfile
@@ -81,7 +82,7 @@ def open_app(app_name: str) -> str:
         Status message
     """
     app_key = app_name.lower().strip()
-    username = os.environ.get("USERNAME", "yadav")
+    username = os.environ.get("USERNAME") or getpass.getuser() or "user"
     
     # Check registry
     if app_key in APP_REGISTRY:
@@ -110,15 +111,17 @@ def open_app(app_name: str) -> str:
     # Fallback: Try start command on Windows
     if platform.system() == 'Windows':
         try:
-            import shlex
-            safe_app_name = shlex.quote(app_name)
-            # Use subprocess.run instead of os.system for better security
-            result = subprocess.run(f'start "" {safe_app_name}', shell=True, 
-                                  capture_output=True, text=True, timeout=10)
+            # Use cmd /c start to launch reliably without shell injection risks.
+            result = subprocess.run(
+                ["cmd", "/c", "start", "", app_name],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                creationflags=0x08000000,
+            )
             if result.returncode == 0:
                 return f"✅ {app_name} dhundh ke khol rahi hoon!"
-            else:
-                logger.warning(f"Failed to start app: {result.stderr}")
+            logger.warning(f"Failed to start app: {result.stderr}")
         except subprocess.TimeoutExpired:
             logger.warning("App start timed out")
         except Exception as e:

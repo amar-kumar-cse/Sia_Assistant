@@ -9,6 +9,11 @@ from PIL import Image
 from dotenv import load_dotenv
 
 try:
+    from analytics import telemetry
+except Exception:
+    telemetry = None
+
+try:
     from google import genai
 except ImportError:
     genai = None
@@ -275,6 +280,9 @@ def analyze_image(image_path: str, question: str = "Is mein kya dikh raha hai? D
         return "Image nahi mili, Hero! Screenshot lene mein problem hui. 😔"
     
     try:
+        if telemetry:
+            telemetry.record_event("vision_trigger", source="image", has_question=bool(question))
+
         # Open and prepare image
         img = Image.open(image_path)
         
@@ -318,6 +326,8 @@ Respond as Sia in Hinglish:"""
                         break
                 except Exception as model_error:
                     last_error = model_error
+                    if telemetry:
+                        telemetry.record_event("error_type", module="vision", error_type=type(model_error).__name__)
                     if _is_quota_error(model_error):
                         _VISION_KEY_BLOCKED_UNTIL[key] = time.time() + _VISION_COOLDOWN_SECONDS
                         _VISION_MODEL_BLOCKED_UNTIL[model] = time.time() + _VISION_COOLDOWN_SECONDS
@@ -341,6 +351,8 @@ Respond as Sia in Hinglish:"""
         
     except Exception as e:
         print(f"❌ Vision analysis failed: {e}")
+        if telemetry:
+            telemetry.record_event("error_type", module="vision", error_type=type(e).__name__)
         return f"[CONFUSED] Arre yaar, image analyze karne mein dikkat aa gayi: {str(e)[:50]}... 😔"
 
 
@@ -348,6 +360,8 @@ def analyze_screen(question: str = "Meri screen pe kya hai? Describe karo.") -> 
     """
     One-shot function: Captures screen and analyzes it.
     """
+    if telemetry:
+        telemetry.record_event("vision_trigger", source="screen")
     screen_path = capture_screen()
     if not screen_path:
         return "[CONFUSED] Screenshot nahi le paayi Hero, kuch problem hai! 😔"

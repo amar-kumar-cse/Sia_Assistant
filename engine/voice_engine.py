@@ -16,9 +16,25 @@ from .logger import get_logger
 
 logger = get_logger(__name__)
 
+try:
+    from analytics import telemetry
+except Exception:  # pragma: no cover
+    telemetry = None
+
+try:
+    from .lipsync_engine import LipSyncEngine
+except Exception:  # pragma: no cover
+    LipSyncEngine = None
+
+_lipsync_engine = LipSyncEngine() if LipSyncEngine else None
+
 # Track the active edge-tts subprocess so we can kill it on interrupt
 _active_subprocess = None
 _active_subprocess_lock = threading.Lock()
+_envelope_lock = threading.Lock()
+_current_envelope = []
+_envelope_start_ts: Optional[float] = None
+_envelope_duration = 0.0
 
 # Get config with error handling
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -141,6 +157,33 @@ def _get_emotion_settings(emotion: Optional[str]) -> Dict[str, str]:
     emotion = (emotion or "IDLE").upper().strip()
     return EMOTION_VOICE_MAP.get(emotion, EMOTION_VOICE_MAP["IDLE"])
 
+
+def _build_synthetic_envelope(text: str, duration_s: float, bins: int = 96):
+    """Create a deterministic speech-energy envelope used by lip-sync when raw amplitude is unavailable."""
+    safe_bins = max(24, bins)
+    safe_duration = max(0.8, duration_s)
+    words = max(1, len((text or "").split()))
+    punctuation_boost = (text.count("!") + text.count("?") + text.count(",")) * 0.015
+    base_energy = min(0.9, 0.45 + min(0.35, words / 40.0) + punctuation_boost)
+
+    env = []
+    for i in range(safe_bins):
+        x = i / float(safe_bins - 1)
+        burst = math.sin((x * words * 2.2) * math.pi)
+        contour = math.sin(x * math.pi)
+        energy = max(0.05, base_energy * (0.55 * abs(burst) + 0.45 * contour))
+        env.append(min(1.0, energy))
+    return env, safe_duration
+
+
+def _set_speech_envelope(text: str, duration_s: float):
+    global _current_envelope, _envelope_start_ts, _envelope_duration
+    env, dur = _build_synthetic_envelope(text, duration_s)
+    with _envelope_lock:
+        _current_envelope = env
+        _envelope_duration = dur
+        _envelope_start_ts = time.time()
+
 def speak(text: str, emotion: Optional[str] = None, callback_started: Optional[Callable[[], None]] = None, callback_finished: Optional[Callable[[], None]] = None) -> None:
     """
     Synthesize speech and play audio with emotion-aware voice settings.
@@ -163,15 +206,19 @@ def speak(text: str, emotion: Optional[str] = None, callback_started: Optional[C
         - Non-blocking with optional callbacks
     """
     emo_settings = _get_emotion_settings(emotion)
+    tts_start = time.time()
     
     # Generate Cache Key based on text and emotion
     raw_key = f"{text}_{emo_settings['voice']}_{emo_settings['rate']}_{emo_settings['pitch']}"
     text_hash = hashlib.md5(raw_key.encode('utf-8')).hexdigest()
     cache_path = os.path.join(CACHE_DIR, f"{text_hash}.mp3")
+    _set_speech_envelope(text, estimate_speech_duration(text))
     
     # Check Cache First
     if os.path.exists(cache_path):
         _voice_state.set_speaking(True)
+        if telemetry:
+            telemetry.record_event("tts_cache_hit")
         if callback_started: callback_started()
         
         try:
@@ -183,6 +230,8 @@ def speak(text: str, emotion: Optional[str] = None, callback_started: Optional[C
             print(f"Cache play error: {e}")
             
         _voice_state.set_speaking(False)
+        if telemetry:
+            telemetry.record_timing("tts", time.time() - tts_start, cached=True)
         if callback_finished: callback_finished()
         return
 
@@ -197,6 +246,8 @@ def speak(text: str, emotion: Optional[str] = None, callback_started: Optional[C
     # No Cache - Generate using Fallback or ElevenLabs
     if use_edge_tts:
         _use_edge_tts_fallback(text, emo_settings, cache_path, callback_started, callback_finished)
+        if telemetry:
+            telemetry.record_timing("tts", time.time() - tts_start, cached=False, backend="edge_or_offline")
         return
 
     # ElevenLabs Generation
@@ -248,6 +299,8 @@ def speak(text: str, emotion: Optional[str] = None, callback_started: Optional[C
                 pygame.time.Clock().tick(10)
             
             _voice_state.set_speaking(False)
+            if telemetry:
+                telemetry.record_timing("tts", time.time() - tts_start, cached=False, backend="elevenlabs")
             if callback_finished: callback_finished()
                 
         else:
@@ -405,6 +458,9 @@ def _use_edge_tts_fallback(text, emo_settings, cache_path, callback_started, cal
                     continue
                 else:
                     raise RuntimeError("Edge-TTS timed out multiple times")
+            finally:
+                with _active_subprocess_lock:
+                    _active_subprocess = None
 
         except FileNotFoundError:
             logger.error("edge-tts command not found - is it installed? pip install edge-tts")
@@ -430,15 +486,17 @@ def _use_edge_tts_fallback(text, emo_settings, cache_path, callback_started, cal
                 continue
             break
 
-    _set_speaking_state(False)
-    if callback_finished:
-        callback_finished()
+    if edge_tts_ok:
+        _set_speaking_state(False)
+        if callback_finished:
+            callback_finished()
+        return
 
-    # If edge-tts failed → pyttsx3 last resort (re-triggers callbacks)
+    # If edge-tts failed → pyttsx3 last resort (single callback path)
     if not edge_tts_ok:
         logger.warning("❌ Edge-TTS exhausted. Falling back to pyttsx3...")
         print("[Sia]: Edge-TTS failed — switching to offline pyttsx3...")
-        _use_pyttsx3_last_resort(text, callback_started, callback_finished)
+        _use_pyttsx3_last_resort(text, None, callback_finished)
 
 
 def stop() -> None:
@@ -464,6 +522,9 @@ def stop() -> None:
     
     _set_speaking_state(False)
     _voice_state.set_streaming(False)
+    global _envelope_start_ts
+    with _envelope_lock:
+        _envelope_start_ts = None
 
 def get_speaking_state() -> bool:
     """Returns current speaking state."""
@@ -480,6 +541,17 @@ def get_audio_frequency() -> float:
     """
     if not _get_speaking_state():
         return 0.0
+
+    with _envelope_lock:
+        env = list(_current_envelope)
+        start_ts = _envelope_start_ts
+        duration_s = _envelope_duration
+
+    if env and start_ts and duration_s > 0:
+        elapsed = max(0.0, time.time() - start_ts)
+        phase = min(0.999, elapsed / duration_s)
+        idx = min(len(env) - 1, int(phase * len(env)))
+        return float(env[idx])
     
     # Rapidly fluctuating value based on time to simulate phoneme energy
     t = time.time() * 12.0  # syllable pacing
@@ -509,6 +581,8 @@ def speak_chunk(text_chunk: str, is_first_chunk: bool = False) -> None:
         is_first_chunk: If True, sets speaking state
     """
     
+    _set_speech_envelope(text_chunk, estimate_speech_duration(text_chunk))
+
     if not ELEVENLABS_API_KEY or "your_elevenlabs_api_key" in ELEVENLABS_API_KEY:
         print(f"[Sia Chunk (Fallback)]: {text_chunk}")
         try:
@@ -590,3 +664,23 @@ def speak_async(text: str, on_start: Optional[Callable[[], None]] = None, on_fin
         if on_finish:
             on_finish()
     threading.Thread(target=_run, daemon=True).start()
+
+
+def play_audio_with_lipsync(audio_file_path: str, amplitude_callback: Callable[[float], None]) -> bool:
+    """Integration helper: play audio with amplitude callback for animation engine."""
+    if not _lipsync_engine:
+        logger.warning("LipSyncEngine unavailable; falling back to plain audio playback")
+        try:
+            pygame.mixer.music.load(audio_file_path)
+            pygame.mixer.music.play()
+            amplitude_callback(0.45)
+            return True
+        except Exception:
+            amplitude_callback(0.0)
+            return False
+    try:
+        _lipsync_engine.play_with_sync(audio_file_path, amplitude_callback)
+        return True
+    except Exception as exc:
+        logger.warning("play_audio_with_lipsync failed: %s", exc)
+        return False

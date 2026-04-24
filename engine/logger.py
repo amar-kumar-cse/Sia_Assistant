@@ -11,6 +11,7 @@ os.makedirs(LOG_DIR, exist_ok=True)
 
 # Path to the specific log file
 LOG_FILE = os.path.join(LOG_DIR, "sia.log")
+ERROR_LOG_FILE = os.path.join(LOG_DIR, "sia_error.log")
 
 # Track all loggers for cleanup
 _loggers = {}
@@ -47,10 +48,21 @@ def get_logger(name):
         )
         file_handler.setLevel(logging.DEBUG)
         file_handler.setFormatter(formatter)
+
+        # Dedicated error file handler per TRD requirement.
+        error_handler = RotatingFileHandler(
+            ERROR_LOG_FILE,
+            maxBytes=5 * 1024 * 1024,
+            backupCount=5,
+            encoding='utf-8'
+        )
+        error_handler.setLevel(logging.ERROR)
+        error_handler.setFormatter(formatter)
         
         # Add handlers to logger
         logger.addHandler(console_handler)
         logger.addHandler(file_handler)
+        logger.addHandler(error_handler)
         
     return logger
 

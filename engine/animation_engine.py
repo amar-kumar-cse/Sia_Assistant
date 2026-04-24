@@ -23,6 +23,8 @@ class AvatarState(Enum):
     LISTENING = auto()
     THINKING  = auto()
     SPEAKING  = auto()
+    HAPPY     = auto()
+    SAD       = auto()
 
 
 @dataclass
@@ -46,8 +48,8 @@ class BlinkController:
     Human-like random blink generator.
     Blink = close (idle→blink, 80ms) + hold (blink, 50ms) + open (blink→idle, 80ms).
     """
-    INTERVAL_MIN  = 3.0    # seconds between blinks
-    INTERVAL_MAX  = 6.5
+    INTERVAL_MIN  = 2.0    # seconds between blinks
+    INTERVAL_MAX  = 5.0
     CLOSE_MS      = 100    # ms for eye-close phase (0.1s crossfade)
     HOLD_MS       = 50     # ms eyes stay closed
     OPEN_MS       = 100    # ms for eye-open phase (0.1s crossfade)
@@ -118,10 +120,12 @@ class LipSyncController:
     def __init__(self):
         self._tick   = 0.0
         self._active = False
+        self._fallback_tick = 0.0
 
     def reset(self):
         self._tick   = 0.0
         self._active = False
+        self._fallback_tick = 0.0
 
     def activate(self):
         self._active = True
@@ -138,9 +142,17 @@ class LipSyncController:
             from engine.voice_engine import get_audio_frequency
             freq = get_audio_frequency()  # 0.0 to 1.0
         except Exception:
-            # Fallback if voice_engine hasn't exposed it
-            self._tick += dt * self.CYCLE_SPEED
-            freq = max(0.0, math.sin(self._tick))
+            # Fallback if amplitude source is unavailable:
+            # deterministic closed->semi->open->semi rhythm.
+            self._fallback_tick = (self._fallback_tick + dt * 4.0) % 4.0
+            if self._fallback_tick < 1.0:
+                freq = 0.2
+            elif self._fallback_tick < 2.0:
+                freq = 0.5
+            elif self._fallback_tick < 3.0:
+                freq = 0.9
+            else:
+                freq = 0.5
 
         # freq controls how open the mouth is. 
         # 0.0 to 0.3 -> idle to semi
@@ -181,6 +193,8 @@ class AnimationEngine:
         AvatarState.LISTENING: (2.5, 3.0),
         AvatarState.THINKING:  (2.0, 3.5),
         AvatarState.SPEAKING:  (3.5, 1.5),   # subtle during speech
+        AvatarState.HAPPY:     (2.1, 3.0),
+        AvatarState.SAD:       (1.4, 2.2),
     }
 
     def __init__(self):
@@ -195,6 +209,7 @@ class AnimationEngine:
         self.breath_offset = 0.0
         self.glow_alpha   = 18
         self.pulse_scale  = 1.0
+        self._emotion_until = 0.0
 
     # ── State management ─────────────────────────────────
     def set_state(self, state: AvatarState):
@@ -206,6 +221,21 @@ class AnimationEngine:
             self._lip.activate()
         elif prev == AvatarState.SPEAKING:
             self._lip.reset()
+
+    def set_emotion(self, emotion: str):
+        em = (emotion or "neutral").strip().lower()
+        if em == "happy":
+            self.set_state(AvatarState.HAPPY)
+            self._emotion_until = time.monotonic() + 3.0
+        elif em == "sad":
+            self.set_state(AvatarState.SAD)
+            self._emotion_until = time.monotonic() + 3.0
+        elif em == "thinking":
+            self.set_state(AvatarState.THINKING)
+            self._emotion_until = time.monotonic() + 2.0
+        else:
+            self.set_state(AvatarState.IDLE)
+            self._emotion_until = 0.0
 
     def get_state(self) -> AvatarState:
         return self._state
@@ -227,6 +257,10 @@ class AnimationEngine:
         self._tick += dt
 
         state = self._state
+        if self._emotion_until and time.monotonic() >= self._emotion_until and state in {AvatarState.HAPPY, AvatarState.SAD, AvatarState.THINKING}:
+            self._emotion_until = 0.0
+            self.set_state(AvatarState.IDLE)
+            state = self._state
         freq, amp = self._BREATH.get(state, (1.5, 3.0))
         self.breath_offset = math.sin(self._tick * freq) * amp
 

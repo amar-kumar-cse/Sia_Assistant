@@ -35,7 +35,7 @@ class StreamingManager:
         self.on_speaking_end = None
         
         # Configuration
-        self.min_chunk_length = 20  # Minimum characters before speaking
+        self.min_chunk_length = 70  # TRD: start speaking at sentence boundary or >=70 chars
         self.sentence_endings = r'[.!?।]'  # Include Hindi sentence ending
         
         # ✅ FIX #6: Track threads for proper cleanup
@@ -64,14 +64,14 @@ class StreamingManager:
                 target=self._text_collector_thread,
                 args=(text_generator,),
                 name="StreamTextCollector",
-                daemon=False  # ✅ Non-daemon
+                daemon=True
             )
             
             self._voice_thread = threading.Thread(
                 target=self._voice_synthesis_thread,
                 args=(voice_callback,),
                 name="StreamVoiceSynthesis",
-                daemon=False  # ✅ Non-daemon
+                daemon=True
             )
             
             self._text_thread.start()
@@ -145,13 +145,16 @@ class StreamingManager:
                     self.on_chunk_received(chunk)
                 
                 # Check if we have complete sentences
-                sentences = self._extract_sentences(buffer)
-                
-                for sentence in sentences:
+                complete, remaining = self._extract_sentences(buffer)
+                for sentence in complete:
                     if len(sentence.strip()) >= self.min_chunk_length:
-                        # Send to voice synthesis queue
                         self.text_queue.put(sentence)
-                        buffer = buffer.replace(sentence, "", 1)
+                buffer = remaining
+
+                # Fallback chunk threshold for long streams without punctuation.
+                if len(buffer.strip()) >= self.min_chunk_length:
+                    self.text_queue.put(buffer.strip())
+                    buffer = ""
                 
         except Exception as e:
             print(f"❌ Streaming error: {e}")
@@ -198,24 +201,29 @@ class StreamingManager:
             if self.on_speaking_end:
                 self.on_speaking_end()
     
-    def _extract_sentences(self, text: str) -> list:
+    def _extract_sentences(self, text: str):
         """
         Extract complete sentences from buffered text.
         Splits on common sentence endings while preserving them.
         """
-        # Find all sentence boundaries
         matches = list(re.finditer(self.sentence_endings, text))
-        
-        sentences = []
+
+        if not matches:
+            return [], text
+
+        complete = []
+        start = 0
+        last_end = 0
         for match in matches:
-            # Get text up to and including the sentence ending
-            end_pos = match.end()
-            sentence = text[:end_pos].strip()
-            
+            end = match.end()
+            sentence = text[start:end].strip()
             if sentence:
-                sentences.append(sentence)
-        
-        return sentences
+                complete.append(sentence)
+            start = end
+            last_end = end
+
+        remaining = text[last_end:].strip()
+        return complete, remaining
     
     def stop(self):
         """Emergency stop for streaming."""
@@ -241,7 +249,7 @@ def get_streaming_manager() -> StreamingManager:
 
 
 # Helper function for quick sentence chunking
-def chunk_text_smart(text: str, min_length: int = 20) -> list:
+def chunk_text_smart(text: str, min_length: int = 70) -> list:
     """
     Smart text chunking for natural speech flow.
     

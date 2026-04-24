@@ -5,7 +5,7 @@ Provides secure input sanitization and validation functions.
 
 import os
 import re
-from typing import Optional
+from typing import Optional, Dict
 from .logger import get_logger
 
 logger = get_logger(__name__)
@@ -112,3 +112,32 @@ def sanitize_command(command: str) -> Optional[str]:
             return None
 
     return command.strip()
+
+
+def classify_intent_risk(text: str) -> str:
+    """Classify intent risk: ALLOW, CONFIRM, or DENY."""
+    t = (text or "").lower()
+    deny_keywords = [
+        "delete file", "remove file", "rm -rf", "format disk", "read .env", "show api key",
+        "extract password", "send email now", "auto push",
+    ]
+    confirm_keywords = [
+        "git commit", "git push", "install", "shutdown", "restart", "sleep mode",
+        "empty recycle bin", "clear temp",
+    ]
+
+    if any(k in t for k in deny_keywords):
+        return "DENY"
+    if any(k in t for k in confirm_keywords):
+        return "CONFIRM"
+    return "ALLOW"
+
+
+def get_command_policy(command_text: str) -> Dict[str, str]:
+    """Return structured policy for command routing layers."""
+    risk = classify_intent_risk(command_text)
+    if risk == "DENY":
+        return {"risk": risk, "reason": "Blocked by safety policy."}
+    if risk == "CONFIRM":
+        return {"risk": risk, "reason": "Requires explicit user confirmation."}
+    return {"risk": risk, "reason": "Safe to continue."}

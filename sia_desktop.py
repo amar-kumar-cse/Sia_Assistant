@@ -100,6 +100,7 @@ class WakeWordThread(QThread):
                     self.paused = True
                     self.text_recognized.emit(text)
             except Exception as e:
+                app_logger.error(f"WakeWordThread error: {e}")
                 time.sleep(1)
 
     def resume(self):
@@ -302,6 +303,7 @@ class SiaDesktop(QWidget):
     ✅ Lip-sync mouth animation
     """
 
+
     def __init__(self):
         super().__init__()
 
@@ -347,9 +349,7 @@ class SiaDesktop(QWidget):
 
         # ── Resources ──
         self._load_character()
-
-        screen = QApplication.primaryScreen().availableGeometry()
-        self.canvas_rect = QRect(screen)
+        self._validate_avatar_assets()
 
         # ── Window flags: frameless, transparent, always-on-top ──
         self.setWindowFlags(
@@ -363,8 +363,22 @@ class SiaDesktop(QWidget):
         self.setAttribute(Qt.WA_NoSystemBackground, True)
         self.setStyleSheet("background: transparent;")
 
-        # ── Size & position: screen-sized transparent canvas ──
+        # ── Size & position: fullscreen and centered ──
+        self._set_fullscreen_center()
+
+        # Listen for screen geometry changes (multi-monitor, resize, etc.)
+        app = QApplication.instance()
+        if app:
+            app.primaryScreen().geometryChanged.connect(self._set_fullscreen_center)
+
+    def _set_fullscreen_center(self):
+        """Force window to fullscreen and center avatar live."""
+        screen = QApplication.primaryScreen().availableGeometry()
         self.setGeometry(screen)
+        # Optionally, force always-on-top again (sometimes lost on Windows)
+        self.setWindowState(Qt.WindowActive)
+        self.raise_()
+        self.activateWindow()
 
         # ── Breathing Logic (Sine-Wave Motion) ──
         # time_counter is in seconds, frequency is radians/sec.
@@ -571,47 +585,87 @@ class SiaDesktop(QWidget):
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
     def _load_character(self, emotion="IDLE"):
-        """Load avatar frame for given emotion. Lip-sync frames always cached."""
+        """Load avatar frame for given emotion with strict v1 fallback behavior."""
         emotion_files = {
-            "IDLE":      ["sia_idle.png"],
-            "SMILE":     ["Sia_open.png",   "sia_idle.png"],
-            "HAPPY":     ["Sia_open.png",   "sia_idle.png"],
-            "SAD":       ["sia_idle.png"],
-            "CONCERNED": ["sia_idle.png"],
-            "CONFUSED":  ["Sia_semi.png",   "sia_idle.png"],
-            "SURPRISED": ["Sia_open.png",   "sia_idle.png"],
-            "ANGRY":     ["sia_idle.png"],
+            "IDLE": ["sia_idle.png"],
+            "SMILE": ["sia_happy.png", "Sia_open.png", "sia_idle.png"],
+            "HAPPY": ["sia_happy.png", "Sia_open.png", "sia_idle.png"],
+            "SAD": ["sia_sad.png", "sia_idle.png"],
+            "CONCERNED": ["sia_sad.png", "sia_idle.png"],
+            "CONFUSED": ["sia_think.png", "Sia_semi.png", "sia_idle.png"],
+            "THINKING": ["sia_think.png", "Sia_semi.png", "sia_idle.png"],
+            "SURPRISED": ["sia_surprise.png", "Sia_open.png", "sia_idle.png"],
+            "ANGRY": ["sia_sad.png", "sia_idle.png"],
         }
-        filenames = emotion_files.get(emotion.upper(), ["sia_idle.png"])
 
-        for fn in filenames:
-            for base in [ASSETS_DIR, SCRIPT_DIR]:
-                path = os.path.join(base, fn)
-                if os.path.exists(path):
-                    px = QPixmap(path)
-                    if not px.isNull():
-                        self.character_pixmap = px
-                        break
-            else:
-                continue
-            break
+        def _load_first_available(candidates):
+            for fn in candidates:
+                for base in [ASSETS_DIR, SCRIPT_DIR]:
+                    path = os.path.join(base, fn)
+                    if os.path.exists(path):
+                        px = QPixmap(path)
+                        if not px.isNull():
+                            return px
+            return None
+
+        selected = _load_first_available(emotion_files.get(emotion.upper(), ["sia_idle.png"]))
+        if selected is not None:
+            self.character_pixmap = selected
+        elif self.character_pixmap is None:
+            self.character_pixmap = QPixmap()
+            app_logger.warning("⚠️ Avatar frame missing for emotion=%s; fallback to empty pixmap", emotion)
 
         # Cache lip-sync frames once
         if not self.lip_pixmaps:
-            for fn in ["sia_idle.png", "Sia_semi.png", "Sia_open.png"]:
-                path = os.path.join(ASSETS_DIR, fn)
-                lp   = QPixmap(path)
-                if lp.isNull() and self.character_pixmap:
+            lip_candidates = [
+                ["sia_talk_closed.png", "sia_idle.png"],
+                ["sia_talk_semi.png", "Sia_semi.png", "sia_idle.png"],
+                ["sia_talk_open.png", "Sia_open.png", "sia_idle.png"],
+            ]
+            for candidates in lip_candidates:
+                lp = _load_first_available(candidates)
+                if lp is None and self.character_pixmap:
                     lp = self.character_pixmap
                 self.lip_pixmaps.append(lp)
             app_logger.info(f"✅ Lip-sync frames: {len(self.lip_pixmaps)} loaded")
 
         # Load blink frame (NEW)
         if self.blink_pixmap is None:
-            blink_path = os.path.join(ASSETS_DIR, "sia_blink.png")
-            bp = QPixmap(blink_path)
-            self.blink_pixmap = bp if not bp.isNull() else self.character_pixmap
-            app_logger.info("✅ Blink frame loaded" if not bp.isNull() else "⚠️  Blink frame not found, using idle")
+            bp = _load_first_available(["sia_blink.png", "sia_idle.png"])
+            self.blink_pixmap = bp if bp is not None else self.character_pixmap
+            app_logger.info("✅ Blink frame loaded" if bp is not None else "⚠️  Blink frame not found, using idle")
+
+    def _validate_avatar_assets(self):
+        """Validate minimum v1 avatar frame set and log explicit missing states."""
+        required = {
+            "idle": ["sia_idle.png"],
+            "blink": ["sia_blink.png"],
+            "talk_closed": ["sia_talk_closed.png", "sia_idle.png"],
+            "talk_semi": ["sia_talk_semi.png", "Sia_semi.png"],
+            "talk_open": ["sia_talk_open.png", "Sia_open.png"],
+            "happy": ["sia_happy.png", "Sia_open.png"],
+            "sad": ["sia_sad.png", "sia_idle.png"],
+            "think": ["sia_think.png", "Sia_semi.png"],
+            "surprise": ["sia_surprise.png", "Sia_open.png"],
+        }
+
+        missing = []
+        for state, candidates in required.items():
+            found = False
+            for fn in candidates:
+                for base in [ASSETS_DIR, SCRIPT_DIR]:
+                    if os.path.exists(os.path.join(base, fn)):
+                        found = True
+                        break
+                if found:
+                    break
+            if not found:
+                missing.append(state)
+
+        if missing:
+            app_logger.warning("⚠️ Avatar asset gaps for states: %s (fallback mode active)", ", ".join(missing))
+        else:
+            app_logger.info("✅ Avatar v1 frame set validated")
 
     def _apply_win32_transparency(self):
         """Remove DWM halo border (Windows only)."""
@@ -741,9 +795,9 @@ class SiaDesktop(QWidget):
         char_w = int(base_w * motion_scale)
         char_h = int(base_h * motion_scale)
         
-        # Position her at the very bottom center of the screen
+        # Position her at the exact center of the screen
         char_x = int(center_x - char_w // 2 + self.breathing_offset_x)
-        char_y = int(h - char_h + self.breathing_offset_y)
+        char_y = int((h - char_h) // 2 + self.breathing_offset_y)
         
         box_rect = QRectF(
             center_x - CANVAS_BOX_W / 2,
@@ -1529,8 +1583,7 @@ class SiaDesktop(QWidget):
         self._show_panel()
 
     def enterEvent(self, event):
-        """On hover → show side panel."""
-        self._show_panel()
+        """On hover."""
         self.target_opacity = 1.0
 
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -1560,6 +1613,9 @@ class SiaDesktop(QWidget):
         self.audio_stream_thread = AudioStreamThread()
         self.audio_stream_thread.start()
 
+        if self.think_thread and self.think_thread.isRunning():
+            self.think_thread.terminate()
+            self.think_thread.wait(1000)
         self.think_thread = ThinkThread(text)
         self.think_thread.chunk_ready.connect(self._on_chunk_ready)
         self.think_thread.response_ready.connect(self._on_response_ready)
@@ -1569,6 +1625,7 @@ class SiaDesktop(QWidget):
         # Stop typewriter, render instantly (Zero Latency UI)
         self.typewriter_timer.stop()
         if self.current_state == "thinking" or not getattr(self, 'bubble_display_text', '').startswith("Sia"):
+             self.bubble_text = "Sia 🧡: "
              self.bubble_display_text = "Sia 🧡: "
              self.current_state = "speaking"
              self._set_status("🧡 Speaking")
@@ -1578,6 +1635,7 @@ class SiaDesktop(QWidget):
         if not clean_chunk:
             return
             
+        self.bubble_text += clean_chunk
         self.bubble_display_text += clean_chunk
         self.update()
 
@@ -1613,7 +1671,10 @@ class SiaDesktop(QWidget):
                 mood_labels = {"RELAX": "🧡 Relax", "ENERGIZE": "🔥 Energy", "FOCUS": "🎯 Focus"}
                 self._set_status(mood_labels.get(mood, "✨ Mood Active"))
                 self._show_bubble(f"Sia 🧡: {text}")
-                self.speak_thread = SpeakThread(text, emotion="SMILE")
+                if self.speak_thread and self.speak_thread.isRunning():
+            self.speak_thread.terminate()
+            self.speak_thread.wait(1000)
+        self.speak_thread = SpeakThread(text, emotion="SMILE")
                 self.speak_thread.speaking_finished.connect(self._on_speaking_finished)
                 self.speak_thread.start()
                 return
@@ -1626,7 +1687,10 @@ class SiaDesktop(QWidget):
             self.current_state = "speaking"
             self._set_status("🌤️ Weather Widget")
             self._show_bubble(f"Sia ❤️: {text}")
-            self.speak_thread = SpeakThread(text, emotion="HAPPY")
+            if self.speak_thread and self.speak_thread.isRunning():
+            self.speak_thread.terminate()
+            self.speak_thread.wait(1000)
+        self.speak_thread = SpeakThread(text, emotion="HAPPY")
             self.speak_thread.speaking_finished.connect(self._on_speaking_finished)
             self.speak_thread.start()
             return
@@ -1645,6 +1709,9 @@ class SiaDesktop(QWidget):
         app_logger.info(f"💬 Sia: {response}")
         memory.add_memory_log(f"Sia: {response}")
 
+        if self.speak_thread and self.speak_thread.isRunning():
+            self.speak_thread.terminate()
+            self.speak_thread.wait(1000)
         self.speak_thread = SpeakThread(response, emotion=emotion)
         self.speak_thread.speaking_started.connect(self._on_speaking_started)
         self.speak_thread.speaking_finished.connect(self._on_speaking_finished)
@@ -1700,6 +1767,9 @@ class SiaDesktop(QWidget):
         if self.current_state != "idle":
             return
         app_logger.info("Starting 5-minute proactive vision loop...")
+        if getattr(self, "proactive_vision_thread", None) and self.proactive_vision_thread.isRunning():
+            self.proactive_vision_thread.terminate()
+            self.proactive_vision_thread.wait(1000)
         self.proactive_vision_thread = ProactiveVisionThread()
         self.proactive_vision_thread.result_ready.connect(self._proactive_speak)
         self.proactive_vision_thread.start()
@@ -1707,6 +1777,9 @@ class SiaDesktop(QWidget):
     def _proactive_speak(self, message):
         if self.current_state != "idle":
             return
+        if self.speak_thread and self.speak_thread.isRunning():
+            self.speak_thread.terminate()
+            self.speak_thread.wait(1000)
         self.speak_thread = SpeakThread(message, "SMILE")
         self.speak_thread.speaking_started.connect(self._on_speaking_started)
         self.speak_thread.speaking_finished.connect(self._on_speaking_finished)
@@ -1766,6 +1839,13 @@ class SiaDesktop(QWidget):
 
 def main():
     try:
+        def _safe_console_print(text: str):
+            try:
+                print(text)
+            except UnicodeEncodeError:
+                fallback = text.encode("ascii", errors="replace").decode("ascii")
+                print(fallback)
+
         if hasattr(Qt, 'AA_EnableHighDpiScaling'):
             QApplication.setAttribute(Qt.AA_EnableHighDpiScaling, True)
         if hasattr(Qt, 'AA_UseHighDpiPixmaps'):
@@ -1786,11 +1866,11 @@ def main():
 
         os.chdir(SCRIPT_DIR)
 
-        print("\n" + "═" * 55)
-        print("  🎀 SIA v3.0 — Floating Desktop Assistant")
-        print("  ✅ Transparent  ✅ Side Panel  ✅ Lip-Sync")
-        print(f"  💖 Say 'Sia' to wake  |  Esc = Hide")
-        print("═" * 55 + "\n")
+        _safe_console_print("\n" + "═" * 55)
+        _safe_console_print("  🎀 SIA v3.0 — Floating Desktop Assistant")
+        _safe_console_print("  ✅ Transparent  ✅ Side Panel  ✅ Lip-Sync")
+        _safe_console_print("  💖 Say 'Sia' to wake  |  Esc = Hide")
+        _safe_console_print("═" * 55 + "\n")
 
         sia = SiaDesktop()
 
@@ -1801,7 +1881,7 @@ def main():
             except ValueError:
                 smoke_seconds = 8.0
             QTimer.singleShot(int(smoke_seconds * 1000), lambda: os._exit(0))
-            print(f"[Smoke Mode] Auto-exit in {smoke_seconds:.1f}s")
+            _safe_console_print(f"[Smoke Mode] Auto-exit in {smoke_seconds:.1f}s")
 
         exit_code = app.exec_()
         if smoke_seconds_raw:
@@ -1809,7 +1889,10 @@ def main():
         sys.exit(exit_code)
 
     except Exception as e:
-        print(f"❌ Fatal: {e}")
+        try:
+            _safe_console_print(f"❌ Fatal: {e}")
+        except Exception:
+            print(f"Fatal: {e}")
         traceback.print_exc()
         sys.exit(1)
 
