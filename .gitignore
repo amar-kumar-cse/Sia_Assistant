@@ -70,8 +70,11 @@ desktop.ini
 # Project specific
 memory.json.backup
 memory.db
+memory.db-shm
+memory.db-wal
 *.log
 *.tmp
+
 
 # RAG Database
 rag_database/

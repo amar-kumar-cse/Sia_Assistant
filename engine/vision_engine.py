@@ -134,6 +134,36 @@ def get_vision_status() -> dict:
     }
 
 
+EXCLUDED_APP_KEYWORDS = [
+    "bank", "password", "keepass", "bitwarden", "1password", "dashlane",
+    "wallet", "login", "credentials", "auth", "payment", "card", "vault", "private"
+]
+_VISION_PAUSED = False
+
+
+def is_vision_paused() -> bool:
+    return _VISION_PAUSED
+
+
+def set_vision_paused(paused: bool):
+    global _VISION_PAUSED
+    _VISION_PAUSED = paused
+
+
+def toggle_vision_pause() -> bool:
+    global _VISION_PAUSED
+    _VISION_PAUSED = not _VISION_PAUSED
+    return _VISION_PAUSED
+
+
+def is_sensitive_app_active() -> Tuple[bool, str]:
+    title = _active_window_title().lower()
+    for kw in EXCLUDED_APP_KEYWORDS:
+        if kw in title:
+            return True, title
+    return False, title
+
+
 def _active_window_title() -> str:
     """Best-effort active window title for local fallback context."""
     try:
@@ -175,9 +205,18 @@ def _safe_remove(path: str):
 
 def capture_screen() -> Optional[str]:
     """
-    Captures a screenshot of the entire screen.
+    Captures a screenshot of the entire screen with privacy exclusion check.
     Returns the path to the saved screenshot image.
     """
+    if _VISION_PAUSED:
+        print("⏸️ Vision analysis is currently PAUSED by user.")
+        return None
+
+    is_sensitive, title = is_sensitive_app_active()
+    if is_sensitive:
+        print(f"🛡️ Vision capture blocked for sensitive window: {title}")
+        return None
+
     try:
         from PIL import ImageGrab
         
@@ -197,9 +236,18 @@ def capture_screen() -> Optional[str]:
 
 def capture_active_window() -> Optional[str]:
     """
-    Captures a screenshot of the currently active window only.
+    Captures a screenshot of the currently active window only with privacy check.
     Returns the path to the saved screenshot image.
     """
+    if _VISION_PAUSED:
+        print("⏸️ Vision analysis is currently PAUSED by user.")
+        return None
+
+    is_sensitive, title = is_sensitive_app_active()
+    if is_sensitive:
+        print(f"🛡️ Window capture blocked for sensitive application: {title}")
+        return None
+
     try:
         from PIL import ImageGrab
         import platform
@@ -225,6 +273,7 @@ def capture_active_window() -> Optional[str]:
     except Exception as e:
         print(f"❌ Window capture failed: {e}")
         return None
+
 
 
 def capture_webcam() -> Optional[str]:

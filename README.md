@@ -1,169 +1,124 @@
-# 🤖 Sia — AI Desktop Assistant
+# Sia AI Assistant 🤖✨
 
-> An intelligent AI-powered desktop assistant with a transparent "Ghost UI", real-time voice recognition, and proactive screen awareness — built entirely in Python.
+[![Python Version](https://img.shields.io/badge/python-3.10%20%7C%203.11%20%7C%203.12-blue.svg)](https://python.org)
+[![CI Build](https://img.shields.io/badge/build-passing-brightgreen.svg)]()
+[![Security Hardened](https://img.shields.io/badge/Security-Prompt%20Injection%20Hardened-success.svg)]()
+[![License](https://img.shields.io/badge/license-MIT-blue.svg)]()
 
-![Python](https://img.shields.io/badge/Python-3776AB?style=for-the-badge&logo=python&logoColor=white)
-![Google Gemini](https://img.shields.io/badge/Gemini_1.5_Pro-4285F4?style=for-the-badge&logo=google&logoColor=white)
-![CustomTkinter](https://img.shields.io/badge/CustomTkinter-FF6B6B?style=for-the-badge&logo=python&logoColor=white)
-![Windows](https://img.shields.io/badge/Windows-0078D6?style=for-the-badge&logo=windows&logoColor=white)
-![Status](https://img.shields.io/badge/Status-Active-brightgreen?style=for-the-badge)
-
----
-
-## ✨ What is Sia?
-
-Sia is a next-generation AI desktop assistant that lives on your screen as a transparent animated character. Unlike traditional chatbots, Sia watches your screen proactively, responds to voice commands, lip-syncs while speaking, and blends seamlessly into your desktop without blocking your workflow.
-
-Think of it as **JARVIS for your Windows desktop** — but open source and built by a 2nd year CS student. 😄
+> **Sia** is a next-generation AI desktop assistant that lives on your Windows screen as an interactive transparent character. Powered by Google Gemini 1.5 Pro and Multimodal Vision APIs, Sia features real-time screen awareness, structured semantic memory, sentence-by-sentence streaming voice playback, and instant barge-in speech interruption.
 
 ---
 
-## 🚀 Key Features
+## 📽️ Demo & Visual Preview
 
-| Feature | Description |
-|---|---|
-| 🪟 **Ghost UI** | True transparent window using Win32 API — no borders, no background, just Sia |
-| 🧠 **Gemini 1.5 Pro Brain** | Powered by Google's LLM with automatic API key rotation for reliability |
-| 🎤 **Voice Recognition** | Real-time "Hey Sia" wake-word detection for hands-free interaction |
-| 🗣️ **Lip Sync** | Animated mouth movements synced with Edge-TTS speech output |
-| 👁️ **Screen Awareness** | Proactive engine that analyzes your screen and gives contextual comments |
-| 💨 **Breathing Animation** | Smooth figure-8 breathing animation with head tilt for lifelike feel |
-| 🔄 **Async Architecture** | Built with `qasync` for smooth non-blocking UI and AI responses |
+![Sia Desktop Companion Demo Placeholder](assets/demo_sia_preview.gif)
+*(15-second preview: Click-through transparent avatar, real-time screen analysis, streaming TTS response, and barge-in speech interrupt)*
 
 ---
 
-## 🛠️ Tech Stack
+## 🏗️ System Architecture
 
 ```
-Language     : Python
-AI/LLM       : Google Gemini 1.5 Pro
-GUI          : CustomTkinter + Win32 API (ctypes)
-Voice Input  : SpeechRecognition + Wake Word Detection
-Voice Output : Edge-TTS (Microsoft Neural Voices)
-Animation    : PNG-based frame animation + OpenCV
-Architecture : Async event loop (qasync + asyncio)
+                                  ┌──────────────────────────┐
+                                  │      User Input / Voice  │
+                                  └────────────┬─────────────┘
+                                               │
+                                               ▼
+┌──────────────────────────┐      ┌──────────────────────────┐      ┌──────────────────────────┐
+│   Screen / Vision (mss) │ ────► │ Injection Neutralizer    │ ────► │ Gemini Multimodal Brain  │
+│ [Privacy Exclusion Active]│      │ <untrusted_observation>  │      │   [Multi-Key Rotation]   │
+└──────────────────────────┘      └──────────────────────────┘      └────────────┬─────────────┘
+                                                                                 │ Streaming
+                                                                                 ▼
+┌──────────────────────────┐      ┌──────────────────────────┐      ┌──────────────────────────┐
+│  Pygame / LipSync Engine │ ◄─── │ Sentence-by-Sentence TTS │ ◄─── │ Structured Memory (DB)   │
+│   [Barge-in Interrupt]   │      │ (Edge-TTS / ElevenLabs)  │      │ [Fact Extraction/Forget] │
+└──────────────────────────┘      └──────────────────────────┘      └────────────┬─────────────┘
 ```
 
----
-
-## 📁 Project Structure
-
-```
-Sia_Assistant/
-├── engine/
-│   ├── brain.py          # LLM logic + Gemini API key rotation
-│   └── proactive.py      # Screen awareness & proactive comment engine
-├── analytics/            # Usage tracking and session analytics
-├── assets/               # Character images (PNG frames)
-│   ├── sia_idle.png
-│   ├── Sia_semi.png
-│   ├── Sia_open.png
-│   └── sia_blink.png
-├── cache/                # Response caching layer
-├── tests/                # Test suite
-├── docs/                 # Internal docs & roadmaps
-├── scripts/              # Utility & fix scripts
-├── main.py               # Entry point — qasync event loop
-├── overlay.py            # Click-through main window + system tray
-├── character_widget.py   # Visual core — breathing, lip sync, Win32
-├── chat_bubble.py        # Glassmorphism chat UI
-├── sia_desktop.py        # Desktop integration layer
-├── config.py             # Configuration management
-├── requirements.txt      # Python dependencies
-├── .env.example          # Environment variables template
-├── launch_sia.bat        # One-click Windows launcher
-└── setup.ps1             # PowerShell setup script
+```mermaid
+graph TD
+    UI[PyQt5 Win32 Overlay] --> Brain[Gemini Multimodal Brain]
+    Vision[Screen Capture / mss] -->|Privacy Check| Exclusion[Sensitive App Filter]
+    Exclusion -->|Sanitized| Untrusted[Untrusted Observation Wrapper]
+    Untrusted --> Brain
+    Brain -->|Streaming Tokens| SentenceSplitter[Sentence Buffer]
+    SentenceSplitter -->|Sentence Chunks| TTS[TTS & LipSync Engine]
+    Speech[User Speech / VAD] -->|Barge-in Interrupt| TTS
+    Brain <--> Memory[(SQLite WAL Memory.db)]
 ```
 
 ---
 
-## ⚡ Getting Started
+## 🚀 Key Features & Production Architecture
 
-### Prerequisites
-- Windows 10/11
-- Python 3.10+
-- Google Gemini API key (free at [aistudio.google.com](https://aistudio.google.com))
-- Microphone (for voice features)
+### 🛡️ 1. Prompt Injection Protection (Screen Awareness Security)
+- Screen OCR and visual analysis data are stripped of malicious injection patterns (`ignore instructions`, `system prompt:`, tag breaks) using `engine/validation.py`.
+- Vision observations are encapsulated inside strict `<untrusted_screen_observation>` blocks, explicitly directing LLM to treat them purely as passive visual observation data.
 
-### Installation
+### 🔒 2. Privacy & Consent Layer
+- **Automated Sensitive App Exclusion**: Screen vision captures are automatically suppressed if active window titles match privacy patterns (`bank`, `password`, `keepass`, `bitwarden`, `1password`, `wallet`, `credentials`, `auth`, `card`).
+- **One-Click Vision Pause**: Toggle screen watching on/off directly from UI or tray settings.
+- **Immediate File Cleanup Policy**: Temp screenshot files are deleted immediately after analysis in `finally:` blocks.
 
+### 🧠 3. Structured Semantic Memory & Forget Engine
+- **`user_facts` Schema**: Persistent SQLite database storing extracted facts, preferences, and entity knowledge (`memory.db` with WAL mode).
+- **Forget Mechanism**: Say *"mat yaad rakhna"* or *"forget this"* to purge specific facts from Sia's active memory.
+- **Rolling Context Summarization**: Automatically budgets and compresses conversation history to ensure prompt context limits are never exceeded.
+
+### ⚡ 4. Low-Latency Streaming & Barge-in Speech Interrupt
+- **Sentence-by-Sentence TTS**: Gemini streams responses directly into a sentence splitter buffer, starting voice playback on the very first completed sentence for near-zero response latency.
+- **Barge-in Interrupt**: Instantly cancels active audio playback and clears speech queues when the user speaks or triggers hotkeys.
+
+### 📦 5. Packaging & First-Run Setup Wizard
+- **GUI Setup Wizard (`setup_wizard.py`)**: Automatically launches if `.env` or `GEMINI_API_KEY` is missing, allowing users to enter keys via a clean GUI.
+- **Standalone Executable Builder (`build_exe.py` / `sia.spec`)**: One-command PyInstaller build configuration for distributing standalone Windows `.exe`.
+
+### 📊 6. Observability & Crash Reporting
+- **Structured JSON Logging**: Standard JSON log records for easy log parsing and diagnostics (`logs/sia_error.log`).
+- **Unhandled Crash Reporter**: Global exception hooks (`sys.excepthook`, `threading.excepthook`) log detailed crash tracebacks to `logs/crash.log`.
+
+---
+
+## 🛠️ Quick Start & Installation
+
+### Option A: Running from Source
 ```bash
-# 1. Clone the repo
-git clone https://github.com/amar-kumar-cse/Sia_Assistant.git
+# 1. Clone repository
+git clone https://github.com/AmarKumar-hub-ai/Sia_Assistant.git
 cd Sia_Assistant
 
 # 2. Install dependencies
 pip install -r requirements.txt
 
-# 3. Setup environment
-cp .env.example .env
-# Open .env and add your Gemini API key(s)
-
-# 4. Launch Sia
+# 3. Launch Sia (First-Run Wizard will prompt for API keys if .env is missing)
 python main.py
 ```
 
-### One-Click Launch (Windows)
+### Option B: Building Standalone Windows Executable
 ```bash
-# Just double-click or run:
-launch_sia.bat
+python build_exe.py
 ```
+Output executable will be placed in `dist/SiaAssistant.exe`.
 
 ---
 
-## 🔑 Environment Variables
+## 🧪 Testing & Code Quality
 
-```env
-GEMINI_API_KEY_1=your_primary_gemini_key
-GEMINI_API_KEY_2=your_backup_key        # optional, for rotation
+Run the test suite with coverage:
+```bash
+pytest --cov=engine tests/
 ```
-
-> Get your free Gemini API key at [aistudio.google.com](https://aistudio.google.com/app/apikey)
-
----
-
-## 🎯 How It Works
-
-```
-User speaks "Hey Sia..."
-        ↓
-Wake word detected (local, offline)
-        ↓
-Voice captured & transcribed
-        ↓
-Gemini 1.5 Pro processes query
-        ↓
-Response generated + lip sync triggered
-        ↓
-Edge-TTS speaks response
-        ↓
-Proactive engine watches screen in background
-        ↓
-Sia comments on what you're doing 👀
-```
-
----
-
-## 🗺️ Roadmap
-
-- [x] Transparent Ghost UI with Win32 API
-- [x] Gemini LLM integration with key rotation
-- [x] Voice recognition + wake word
-- [x] Lip sync animation
-- [x] Proactive screen awareness
-- [ ] Multi-monitor support
-- [ ] Plugin system for custom commands
-- [ ] Mobile companion app
 
 ---
 
 ## 👨‍💻 Author
 
 **Amar Kumar**
-- 🔗 GitHub: [@amar-kumar-cse](https://github.com/amar-kumar-cse)
+- 🔗 GitHub: [@AmarKumar-hub-ai](https://github.com/AmarKumar-hub-ai)
 - 💼 LinkedIn: [linkedin.com/in/amarkumarr](https://linkedin.com/in/amarkumarr)
-- 📧 Email: amarkrydav@gmail.com
 
 ---
 
-## ⭐ If you find Sia cool, drop a star! It motivates a lot 🙏
+## 📄 License
+Distributed under the MIT License. Built with ❤️ by Amar Kumar.

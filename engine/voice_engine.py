@@ -684,3 +684,79 @@ def play_audio_with_lipsync(audio_file_path: str, amplitude_callback: Callable[[
     except Exception as exc:
         logger.warning("play_audio_with_lipsync failed: %s", exc)
         return False
+
+
+_speech_interrupted = False
+
+def interrupt_speech() -> None:
+    """Immediately stop audio playback, kill active subprocesses, and halt speech queue."""
+    global _speech_interrupted
+    _speech_interrupted = True
+    try:
+        if pygame.mixer.get_init() and pygame.mixer.music.get_busy():
+            pygame.mixer.music.stop()
+    except Exception:
+        pass
+
+    with _active_subprocess_lock:
+        global _active_subprocess
+        if _active_subprocess and _active_subprocess.poll() is None:
+            try:
+                _active_subprocess.kill()
+            except Exception:
+                pass
+            _active_subprocess = None
+
+    _set_speaking_state(False)
+    _voice_state.set_speaking(False)
+    _voice_state.set_streaming(False)
+    print("🛑 Speech interrupted (Barge-in).")
+
+
+def stop_speaking() -> None:
+    """Alias for interrupt_speech()."""
+    interrupt_speech()
+
+
+def speak_stream_sentences(token_generator) -> str:
+    """
+    Sentence-by-sentence streaming TTS. Receives text token stream, synthesizes & plays
+    sentence by sentence for minimal response latency. Supports instant barge-in interrupt.
+    """
+    global _speech_interrupted
+    _speech_interrupted = False
+
+    buffer = ""
+    full_text = ""
+    is_first = True
+
+    delimiters = {".", "!", "?", "\n"}
+
+    for token in token_generator:
+        if _speech_interrupted:
+            break
+
+        buffer += token
+        full_text += token
+
+        # Check if buffer contains sentence boundary
+        for delim in delimiters:
+            if delim in buffer:
+                parts = buffer.split(delim, 1)
+                sentence = (parts[0] + delim).strip()
+                buffer = parts[1] if len(parts) > 1 else ""
+
+                if sentence:
+                    speak_chunk(sentence, is_first_chunk=is_first)
+                    is_first = False
+
+                if _speech_interrupted:
+                    break
+
+    # Speak any remaining buffer text
+    if buffer.strip() and not _speech_interrupted:
+        speak_chunk(buffer.strip(), is_first_chunk=is_first)
+
+    finish_streaming()
+    return full_text
+

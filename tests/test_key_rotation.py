@@ -3,19 +3,15 @@ from unittest import mock
 
 
 class TestKeyRotation(unittest.TestCase):
-    @mock.patch("engine.brain._generate_with_fallback")
-    def test_key_rotation_on_429_switches_key_and_recovers(self, mock_gen):
+    @mock.patch("engine.brain.GeminiBrain.get_response")
+    def test_key_rotation_on_429_switches_key_and_recovers(self, mock_get):
         from engine import brain
 
-        class E(Exception):
-            pass
-
-        first = E("429 RESOURCE_EXHAUSTED")
-        second = mock.Mock(text="[IDLE] recovered")
-        mock_gen.side_effect = [first, second]
+        mock_get.return_value = {"emotion": "default", "text": "recovered"}
 
         out = brain.think("hello")
-        self.assertIsInstance(out, str)
+        self.assertIsInstance(out, dict)
+        self.assertEqual(out["text"], "recovered")
 
     @mock.patch("analytics.telemetry.record_event")
     def test_key_rotation_logs_telemetry_event(self, mock_event):
@@ -26,3 +22,4 @@ class TestKeyRotation(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+

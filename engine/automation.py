@@ -85,9 +85,22 @@ class SiaProactiveEngine:
         if self.speak:
             self.speak(message)
 
+    def check_system_health(self):
+        """Run all system health checks (battery, cpu, ram, temp)."""
+        now = time.time()
+        self._check_battery(now)
+        self._check_cpu(now)
+        self._check_ram(now)
+        self._check_temperature(now)
+
+    def _check_system_health(self):
+        """Alias for check_system_health."""
+        self.check_system_health()
+
     # ─────────────────────────────────────────────────────────────────
     #  BATTERY CHECK
     # ─────────────────────────────────────────────────────────────────
+
 
     def _check_battery(self, now: float):
         try:
