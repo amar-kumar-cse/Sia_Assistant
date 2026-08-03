@@ -317,6 +317,11 @@ def get_user_fact(key: str) -> Optional[Dict[str, Any]]:
     return dict(row) if row else None
 
 
+def get_facts(category: Optional[str] = None) -> List[Dict[str, Any]]:
+    return _memory_instance.get_facts(category=category)
+
+
+
 def set_preference(key: str, value: str):
     _memory_instance.set_profile(key, value)
     with _memory_cache_lock:
