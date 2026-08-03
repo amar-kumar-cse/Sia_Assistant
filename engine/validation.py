@@ -83,6 +83,19 @@ def validate_file_path(filepath: str) -> bool:
         logger.warning(f"Invalid file path: {filepath} - {e}")
         return False
 
+
+def is_path_within_root(target_path: str, root_path: str) -> bool:
+    """Enforce that target_path resolves strictly within root_path directory boundary."""
+    try:
+        import pathlib
+        target = pathlib.Path(target_path).resolve()
+        root = pathlib.Path(root_path).resolve()
+        return root in target.parents or target == root
+    except Exception as e:
+        logger.warning(f"Root boundary check failed for {target_path}: {e}")
+        return False
+
+
 def sanitize_command(command: str) -> Optional[str]:
     """
     Sanitize shell commands to prevent injection attacks.

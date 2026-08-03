@@ -24,6 +24,9 @@ a = Analysis(
         ('.env.example', '.'),
     ],
     hiddenimports=[
+        'engine.avatar_state_machine',
+        'engine.keychain',
+        'engine.cache_manager',
         'engine.brain',
         'engine.vision_engine',
         'engine.voice_engine',
@@ -34,6 +37,7 @@ a = Analysis(
         'engine.actions',
         'engine.automation',
         'google.generativeai',
+        'keyring',
         'PIL',
         'mss',
         'pygame',

@@ -47,18 +47,36 @@ class SiaOverlay(QMainWindow):
         self.character = SiaCharacterWidget()   # top-level (not child)
         self.character.base_x = self.CHAR_X
         self.character.base_y = self.CHAR_Y
-        self.character.move(self.CHAR_X, self.CHAR_Y)
+        # ── 5. Vision Observation Active Badge State ─────────────────────────────
+        self._vision_active = False
+        self._vision_pulse = 0
 
-        # ── 4. Chat bubble ─────────────────────────────────────────
-        self.bubble = SiaChatBubble(self)
-        self.bubble.move(self.BUBBLE_X, self.BUBBLE_Y)
-        self.bubble.hide()
-
-        # ── 5. System tray ─────────────────────────────────────────
+        # ── 6. System tray ─────────────────────────────────────────
         self._setup_tray()
 
-        # ── 6. Apply click-through after show ─────────────────────
+        # ── 7. Apply click-through after show ─────────────────────
         QTimer.singleShot(200, self._apply_click_through)
+
+    def set_vision_indicator(self, active: bool):
+        """Toggle active visual indicator for screen recording/observation."""
+        self._vision_active = active
+        self.update()
+
+    def set_target_screen(self, screen_index: int = 0):
+        """Multi-monitor support: reposition Sia overlay to designated screen index."""
+        screens = QApplication.screens()
+        if 0 <= screen_index < len(screens):
+            geo = screens[screen_index].geometry()
+            self.sw, self.sh = geo.width(), geo.height()
+            self.setGeometry(geo.left(), geo.top(), self.sw, self.sh)
+            self.CHAR_X = geo.left() + self.sw - 380
+            self.CHAR_Y = geo.top() + self.sh - 560
+            self.BUBBLE_X = self.CHAR_X - 340
+            self.BUBBLE_Y = self.CHAR_Y + 200
+            self.character.base_x = self.CHAR_X
+            self.character.base_y = self.CHAR_Y
+            self.character.move(self.CHAR_X, self.CHAR_Y)
+            self.bubble.move(self.BUBBLE_X, self.BUBBLE_Y)
 
     # ── Win32 click-through ──────────────────────────────────────────
 
@@ -115,6 +133,14 @@ class SiaOverlay(QMainWindow):
         p = QPainter(self)
         p.setCompositionMode(QPainter.CompositionMode.CompositionMode_Clear)
         p.fillRect(self.rect(), QColor(0, 0, 0, 0))
+
+        if getattr(self, '_vision_active', False):
+            p.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceOver)
+            # Red glowing indicator dot at top right of Sia's area
+            p.setBrush(QColor(255, 50, 50, 220))
+            p.setPen(Qt.PenStyle.NoPen)
+            p.drawEllipse(self.CHAR_X + 320, self.CHAR_Y + 10, 14, 14)
+
 
     # ── Show both windows ────────────────────────────────────────────
 

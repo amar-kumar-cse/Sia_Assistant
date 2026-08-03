@@ -127,6 +127,27 @@ class VoiceState:
 # Create global instance
 _voice_state = VoiceState()
 
+
+def stop_speaking():
+    """Instantly interrupts active speech playback for Barge-In capability."""
+    global _active_subprocess
+    _voice_state.set_speaking(False)
+    _voice_state.set_streaming(False)
+    try:
+        if pygame.mixer.get_init():
+            pygame.mixer.music.stop()
+    except Exception as e:
+        logger.warning(f"Error stopping pygame mixer: {e}")
+
+    with _active_subprocess_lock:
+        if _active_subprocess and _active_subprocess.poll() is None:
+            try:
+                _active_subprocess.terminate()
+                _active_subprocess = None
+            except Exception as e:
+                logger.warning(f"Error terminating edge-tts subprocess: {e}")
+
+
 # ✅ FIX #4: Keep old API for backward compatibility
 def _set_speaking_state(state: bool):
     """Thread-safe setter for is_speaking global state."""

@@ -141,6 +141,29 @@ EXCLUDED_APP_KEYWORDS = [
 _VISION_PAUSED = False
 
 
+def sanitize_screen_prompt_input(text: str) -> str:
+    """Sanitize raw text/OCR extracted from screen to prevent LLM prompt injection."""
+    if not text:
+        return ""
+    import re
+    # Remove system role override attempts
+    forbidden_patterns = [
+        r"ignore\s+(all\s+)?previous\s+instructions",
+        r"system\s*:",
+        r"assistant\s*:",
+        r"user\s*:",
+        r"you\s+are\s+now\s+a",
+        r"override\s+system\s+prompt"
+    ]
+    sanitized = text
+    for pattern in forbidden_patterns:
+        sanitized = re.sub(pattern, "[FILTERED_INSTRUCTION]", sanitized, flags=re.IGNORECASE)
+    
+    # Wrap in untrusted container
+    return f"<untrusted_screen_observation>\n{sanitized.strip()}\n</untrusted_screen_observation>"
+
+
+
 def is_vision_paused() -> bool:
     return _VISION_PAUSED
 

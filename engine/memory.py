@@ -18,10 +18,8 @@ from typing import Any, Dict, List, Optional
 
 _BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _DB_PATH = os.path.join(_BASE_DIR, "memory.db")
-_db_lock = threading.Lock()
-
-# In-memory dictionary state for JSON legacy cache compatibility
-_memory_cache_lock = threading.Lock()
+_db_lock = threading.RLock()
+_memory_cache_lock = threading.RLock()
 _memory_cache: Dict[str, Any] = {
     "personal": {"name": "Amar Kumar", "work": "Nowic Studio"},
     "files": {"resume_path": os.path.join(_BASE_DIR, "assets", "resume.pdf")},
@@ -390,3 +388,10 @@ def prune_memory() -> Dict[str, int]:
         c2 = conn.execute("DELETE FROM todos WHERE status='done'").rowcount
         conn.commit()
     return {"facts": c1, "todos": c2}
+
+
+def cleanup_retention_policy(days: int = 30):
+    """Purge historical conversation logs and vision logs older than retention limit."""
+    _memory_instance.cleanup_old(days=days)
+    return True
+

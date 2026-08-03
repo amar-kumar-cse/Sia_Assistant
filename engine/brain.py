@@ -81,9 +81,41 @@ class GeminiBrain:
             text = text.replace(match.group(0), '').strip()
         return {'emotion': emotion, 'text': text}
 
+    def _query_ollama(self, prompt: str) -> Optional[str]:
+        import requests
+        url = os.getenv("OLLAMA_URL", "http://localhost:11434/api/generate")
+        model = os.getenv("OLLAMA_MODEL", "llama3")
+        try:
+            r = requests.post(url, json={"model": model, "prompt": prompt, "stream": False}, timeout=8)
+            if r.status_code == 200:
+                return r.json().get("response", "")
+        except Exception:
+            pass
+        return None
+
     def get_response(self, text, history=[]):
+        # 1. Check local-only mode flag
+        if os.getenv("SIA_LOCAL_ONLY", "false").lower() in ("true", "1", "yes"):
+            local_res = self._query_ollama(text)
+            if local_res:
+                return self._parse(f"[EMOTION:happy] (Local Mode) {local_res}")
+            return {'emotion': 'default', 'text': 'Hero, Local mode active hai but Ollama response nahi de raha! Check karo http://localhost:11434'}
+
+        # 2. Check cache
+        from .cache_manager import cache_manager
+        cached = cache_manager.get(text)
+        if cached:
+            return cached
+
+        # 3. Truncate context window to last 8 turns
+        truncated_history = history[-8:] if len(history) > 8 else history
+
         if not self.keys:
-            return {'emotion': 'error', 'text': 'Hero, API key nahi mili! Please .env check karo.'}
+            # Fallback to local Ollama if no cloud keys configured
+            local_res = self._query_ollama(text)
+            if local_res:
+                return self._parse(f"[EMOTION:happy] {local_res}")
+            return {'emotion': 'error', 'text': 'Hero, API key nahi mili aur Ollama offline hai! Please .env check karo.'}
             
         with self.lock:
             for i in range(len(self.keys)):
@@ -96,24 +128,30 @@ class GeminiBrain:
                         system_instruction=SIA_SYSTEM_PROMPT
                     )
                     
-                    context = self._build_context(text, history)
+                    context = self._build_context(text, truncated_history)
                     response = model.generate_content(context)
                     
                     self.current_idx = idx # Update to successful key
-                    return self._parse(response.text)
+                    parsed = self._parse(response.text)
+                    cache_manager.set(text, parsed)
+                    return parsed
                     
                 except Exception as e:
                     error_msg = str(e).lower()
                     if any(x in error_msg for x in ['429', 'quota', 'limit', 'resource_exhausted']):
                         print(f"[Brain] Key {idx} limit reached, rotating...")
                         continue
-                    # Reraise if it's not a quota error
-                    raise e
+                    # Try next key on unexpected model error
+                    continue
             
-            # If all keys failed due to quota
+            # If all cloud keys exhausted, try Ollama
+            local_res = self._query_ollama(text)
+            if local_res:
+                return self._parse(f"[EMOTION:happy] (Offline Fallback) {local_res}")
+
             return {
                 'emotion': 'error',
-                'text': 'Oops Hero! 😅 Sab keys ki limit ho gayi. Thodi der baad try karo!'
+                'text': 'Oops Hero! 😅 Sab keys ki limit ho gayi. Local Ollama host check karo ya thodi der baad try karo!'
             }
 
     def get_response_stream(self, text, history=[]):

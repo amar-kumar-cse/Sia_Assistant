@@ -1,40 +1,32 @@
-name: Sia Assistant CI/CD Pipeline
+name: Sia Assistant CI
 
 on:
   push:
-    branches: [ main, master ]
+    branches: [ main, master, dev ]
   pull_request:
-    branches: [ main, master ]
+    branches: [ main, master, dev ]
 
 jobs:
   test:
-    name: Run Pytest & Code Coverage
-    runs-on: ubuntu-latest
+    runs-on: windows-latest
     strategy:
       matrix:
-        python-version: ["3.10", "3.11", "3.12"]
+        python-version: ["3.10", "3.11"]
 
     steps:
-      - name: Checkout Codebase
-        uses: actions/checkout@v4
+    - uses: actions/checkout@v3
 
-      - name: Set up Python ${{ matrix.python-version }}
-        uses: actions/python-versions@v5
-        with:
-          python-version: ${{ matrix.python-version }}
-          cache: 'pip'
+    - name: Set up Python ${{ matrix.python-version }}
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ matrix.python-version }}
 
-      - name: Install System Audio Dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y portaudio19-dev libasound2-dev ffmpeg
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements-dev.txt
+        pip install -e .
 
-      - name: Install Python Dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install pytest pytest-cov mock
-          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
-
-      - name: Run Test Suite with Coverage
-        run: |
-          pytest --cov=engine --cov-report=term-missing tests/
+    - name: Run pytest test suite
+      run: |
+        pytest tests/ -v

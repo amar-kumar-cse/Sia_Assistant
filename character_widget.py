@@ -129,6 +129,22 @@ class SiaCharacterWidget(QWidget):
         self._active_layer = 0   # 0 = a, 1 = b
         self._crossfade_anim = None
 
+        # ── Connect Avatar State Machine listener ─────────────────────────
+        try:
+            from engine.avatar_state_machine import avatar_state_machine, AvatarState
+            def _on_asm_transition(old_s, new_s):
+                mapping = {
+                    AvatarState.IDLE: "idle",
+                    AvatarState.LISTENING: "listening",
+                    AvatarState.THINKING: "thinking",
+                    AvatarState.SPEAKING: "talking",
+                    AvatarState.ERROR: "idle"
+                }
+                self.set_state(mapping.get(new_s, "idle"))
+            avatar_state_machine.add_listener(_on_asm_transition)
+        except Exception as e:
+            print(f"[Character Widget] State machine connection warning: {e}")
+
         QTimer.singleShot(150, self._init_video)
         print("[Sia Video Engine] Initialized")
 
