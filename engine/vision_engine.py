@@ -463,6 +463,16 @@ def analyze_webcam(question: str = "Kya dikh raha hai camera mein?") -> str:
     return analyze_image(webcam_path, question)
 
 
+def analyze_proactive_ide_error() -> Optional[str]:
+    """Proactively inspect active IDE/terminal window for visible code tracebacks and syntax errors."""
+    title = _active_window_title().lower()
+    ide_keywords = ["vscode", "visual studio", "pycharm", "sublime", "terminal", "cmd", "powershell", "python"]
+    if any(k in title for k in ide_keywords):
+        print(f"🔍 Proactive IDE Error Scanner inspecting: {title}")
+        return analyze_error_on_screen()
+    return None
+
+
 def analyze_error_on_screen() -> str:
     """
     Special function to detect and explain errors on screen.

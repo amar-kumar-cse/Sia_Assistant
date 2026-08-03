@@ -340,13 +340,19 @@ def listen_with_vad():
         print(f"❌ VAD Microphone error: {e}")
         return None
     
-    try:
-        text = recognizer.recognize_google(audio)
-        print(f"✅ VAD Heard: {text}")
-        return text
-    except sr.UnknownValueError:
-        return None
-    except sr.RequestError as e:
-        print(f"❌ VAD error: {e}")
-        return None
+_last_active_speech_timestamp = 0.0
+CONTINUOUS_SESSION_TIMEOUT = 5.0  # seconds
+
+
+def set_active_session():
+    """Mark an active speech turn to keep continuous session open."""
+    global _last_active_speech_timestamp
+    _last_active_speech_timestamp = time.time()
+
+
+def is_in_continuous_session() -> bool:
+    """Returns True if within continuous follow-up window (5s after last reply)."""
+    global _last_active_speech_timestamp
+    return (time.time() - _last_active_speech_timestamp) < CONTINUOUS_SESSION_TIMEOUT
+
 

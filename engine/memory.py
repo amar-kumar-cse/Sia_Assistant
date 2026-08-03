@@ -400,3 +400,19 @@ def cleanup_retention_policy(days: int = 30):
     _memory_instance.cleanup_old(days=days)
     return True
 
+
+def extract_and_save_facts(user_msg: str, sia_response: str) -> bool:
+    """Extract structured facts (names, preferences, routine) from dialogue and persist to SQLite user_facts."""
+    if not user_msg:
+        return False
+    u = user_msg.lower()
+    if "mera naam" in u or "my name is" in u:
+        name = user_msg.split("is")[-1] if "is" in user_msg else user_msg.split("naam")[-1]
+        learn_fact(fact=f"User's name is {name.strip()}", fact_key="user_name", category="personal")
+    elif "mujhe" in u and "pasand" in u:
+        learn_fact(fact=user_msg.strip(), category="preference")
+    elif "i work at" in u or "main kaam karta hoon" in u:
+        learn_fact(fact=user_msg.strip(), category="work")
+    return True
+
+
