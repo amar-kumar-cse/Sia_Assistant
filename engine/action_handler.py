@@ -56,16 +56,17 @@ class ActionHandler(BaseService):
             'learn_fact': self._handle_learn_fact,
         })
 
-    def execute(self, action_type: str, command: str) -> Optional[str]:
+    def execute(self, action_type: str, command: str, source: str = "direct_user_input") -> Optional[str]:
         """
-        Execute an action handler.
+        Execute an action handler with pre-execution safety gate checks.
 
         Args:
             action_type: Type of action to execute
             command: Command string for the action
+            source: Source of the trigger (direct_user_input vs untrusted_screen_observation)
 
         Returns:
-            Result of the action or None if not found
+            Result of the action or permission status message
         """
         if not self._validate_input(action_type, str, "action_type"):
             return None
@@ -73,11 +74,38 @@ class ActionHandler(BaseService):
         if not self._validate_input(command, str, "command"):
             return None
 
+        # Pre-Execution Safety Gate Check
+        try:
+            from .permission_gate import permission_gate, ActionRiskLevel
+            from .audit_logger import log_action
+
+            risk_level, reason = permission_gate.evaluate_action(action_type, command, source=source)
+
+            if risk_level == ActionRiskLevel.DENY:
+                return reason
+
+            if risk_level == ActionRiskLevel.CONFIRM:
+                from .actions import _queue_confirmation
+                return _queue_confirmation(
+                    f"Action '{action_type}' ({command})",
+                    lambda: self._execute_unfiltered(action_type, command)
+                )
+        except Exception as gate_err:
+            logger.warning(f"Permission gate warning: {gate_err}")
+
+        return self._execute_unfiltered(action_type, command)
+
+    def _execute_unfiltered(self, action_type: str, command: str) -> Optional[str]:
         handler = self._handlers.get(action_type.lower())
         if handler:
             try:
-                return handler(command)
+                res = handler(command)
+                from .audit_logger import log_action
+                log_action(action_type, risk_level="ALLOW", status="SUCCESS", details=command)
+                return res
             except Exception as e:
+                from .audit_logger import log_action
+                log_action(action_type, risk_level="ALLOW", status="ERROR", details=str(e))
                 return self._handle_error(e, f"executing {action_type}", f"{action_type.title()} failed")
         else:
             logger.warning(f"Unknown action type: {action_type}")
