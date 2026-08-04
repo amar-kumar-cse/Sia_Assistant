@@ -50,7 +50,47 @@ def add_reminder_tool(task: str) -> str:
     from .productivity import productivity_engine
     return productivity_engine.add_reminder(task)
 
-SIA_TOOLS = [open_app_tool, get_weather_tool, add_reminder_tool]
+def kill_app_tool(app_name: str) -> str:
+    """Kill / force-close a running application by name. Requires user confirmation."""
+    from .action_handler import action_handler
+    return action_handler.execute("kill_app", app_name) or f"Tried to close {app_name}"
+
+def web_search_tool(query: str) -> str:
+    """Search the web for any query and return a summary of results."""
+    from .action_handler import action_handler
+    return action_handler.execute("web_search", query) or "Search completed"
+
+def set_volume_tool(level: int) -> str:
+    """Set the system volume to a level between 0 and 100."""
+    from .action_handler import action_handler
+    return action_handler.execute("volume", str(level)) or f"Volume set to {level}"
+
+def get_system_info_tool() -> str:
+    """Get current system information including CPU, RAM, battery, and OS details."""
+    from .action_handler import action_handler
+    return action_handler.execute("system_info", "") or "System info retrieved"
+
+def analyze_screen_tool(query: str) -> str:
+    """Analyze what is currently on the screen and answer a question about it."""
+    from .action_handler import action_handler
+    return action_handler.execute("vision_screen", query, source="direct_user_input") or "Screen analyzed"
+
+def get_news_tool(topic: str = "India technology") -> str:
+    """Get the latest news headlines for a given topic."""
+    from .action_handler import action_handler
+    return action_handler.execute("news", topic) or "News fetched"
+
+SIA_TOOLS = [
+    open_app_tool,
+    get_weather_tool,
+    add_reminder_tool,
+    kill_app_tool,
+    web_search_tool,
+    set_volume_tool,
+    get_system_info_tool,
+    analyze_screen_tool,
+    get_news_tool,
+]
 
 
 class GeminiBrain:
@@ -195,7 +235,8 @@ class GeminiBrain:
                     
                     model = genai.GenerativeModel(
                         self.model_name,
-                        system_instruction=SIA_SYSTEM_PROMPT
+                        system_instruction=SIA_SYSTEM_PROMPT,
+                        tools=SIA_TOOLS,
                     )
                     
                     context = self._build_context(text, history)

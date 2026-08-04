@@ -4,6 +4,9 @@ Sia AI — Main Application Entry Point (PyQt6 FINAL)
 - PyQt6 + qasync event loop
 - All engines wired together
 - Graceful fallbacks for missing engine modules
+- Permission Gate confirmation loop wired
+- VoiceInterruptMonitor (barge-in) wired
+- Continuous session (no repeat wake-word) wired
 """
 
 import os
@@ -140,7 +143,10 @@ class SiaApp(QObject):
         print("[Sia] Wake word detected!")
         self.character.set_state("listening")
         self.bubble.show_message("Sun rahi hoon Hero...", "listening")
+        self._start_listening()
 
+    def _start_listening(self):
+        """Start a speech recognizer cycle."""
         self.recognizer = SpeechRecognizer()
         self.recognizer.result.connect(
             lambda text: asyncio.ensure_future(self.on_speech(text)))
@@ -151,6 +157,38 @@ class SiaApp(QObject):
 
     async def on_speech(self, text: str):
         print(f"[User] {text}")
+
+        # ── [STEP 1 FIX] Confirmation Gate Interceptor ───────────
+        # If a destructive action is pending confirmation, intercept FIRST
+        # before any other intent / Gemini processing.
+        try:
+            from engine.actions import _pending_confirmation, _consume_confirmation
+            if _pending_confirmation.get("action") is not None:
+                text_lower = text.lower().strip()
+                # Confirm triggers (Hinglish + English)
+                if any(kw in text_lower for kw in [
+                    "confirm", "haan", "ha", "yes", "kar do", "karo", "ok", "okay",
+                    "proceed", "theek hai", "bilkul"
+                ]):
+                    result = _consume_confirmation(True)
+                    if result:
+                        await self._respond(f"✅ {result}", "happy")
+                    else:
+                        await self._respond("✅ Action execute ho gayi Hero!", "happy")
+                    self._maybe_continue_session()
+                    return
+                # Cancel triggers (Hinglish + English)
+                elif any(kw in text_lower for kw in [
+                    "cancel", "nahi", "na", "no", "ruk", "ruko", "mat karo", "band karo", "stop"
+                ]):
+                    result = _consume_confirmation(False)
+                    await self._respond(result or "✅ Action cancel kar diya Hero.", "happy")
+                    self._maybe_continue_session()
+                    return
+        except Exception as gate_err:
+            print(f"[ConfirmInterceptor] Warning: {gate_err}")
+
+        # ── Normal intent / Gemini flow ──────────────────────────
         intent = self.intent.detect(text)
 
         if intent.get("handled"):
@@ -167,6 +205,31 @@ class SiaApp(QObject):
             self.memory.save(text, response["text"], response["emotion"])
             await self._respond(response["text"], response["emotion"])
 
+        # ── [STEP 4 FIX] Mark active session for follow-up window ─
+        self._maybe_continue_session()
+
+    def _maybe_continue_session(self):
+        """After Sia responds, mark active session so user doesn't need wake word for 5s."""
+        try:
+            from engine.listen_engine import set_active_session, is_in_continuous_session
+            set_active_session()
+            # Schedule a follow-up listen cycle after response finishes
+            asyncio.ensure_future(self._follow_up_listen())
+        except Exception:
+            pass
+
+    async def _follow_up_listen(self):
+        """After Sia speaks, wait briefly then auto-listen within continuous session window."""
+        try:
+            from engine.listen_engine import is_in_continuous_session
+            # Wait for Sia to finish speaking
+            await asyncio.sleep(0.3)
+            if is_in_continuous_session():
+                print("[ContinuousSession] Auto-listening for follow-up (no wake word needed)...")
+                self._start_listening()
+        except Exception as e:
+            print(f"[ContinuousSession] Warning: {e}")
+
     # ── Respond (TTS + animation) ─────────────────────────────────
 
     async def _respond(self, text: str, emotion: str = "default"):
@@ -174,7 +237,27 @@ class SiaApp(QObject):
         self.character.on_emotion(emotion)
         self.character.set_state("talking")
         self.bubble.show_message(text, "normal")
+
+        # ── [STEP 4 FIX] Start barge-in monitor while speaking ────
+        interrupt_monitor = None
+        try:
+            from engine.listen_engine import VoiceInterruptMonitor
+            interrupt_monitor = VoiceInterruptMonitor(
+                interrupt_callback=self.voice.stop,
+                is_speaking_fn=getattr(self.voice, 'get_speaking_state', lambda: True),
+            )
+            interrupt_monitor.start()
+        except Exception:
+            pass  # Graceful fallback if pyaudio not available
+
         await self._wait_speak(text)
+
+        if interrupt_monitor:
+            try:
+                interrupt_monitor.stop()
+            except Exception:
+                pass
+
         self.character.set_state("idle")
 
     # ── Error handler ─────────────────────────────────────────────
