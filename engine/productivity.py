@@ -175,12 +175,79 @@ class ProductivityEngine:
             pass
         return [{"title": "No Google OAuth credentials.json configured. Add it to project root to enable live calendar.", "time": "N/A"}]
 
-    def get_unread_emails(self) -> str:
-        """Fetch unread Gmail summary or return local inbox status."""
-        cred_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "credentials.json")
+    def get_unread_emails(self, max_results: int = 5) -> str:
+        """
+        Fetch unread Gmail summary via OAuth2 API (gmail.readonly scope).
+        Returns formatted digest of primary unread emails or clean status.
+        """
+        base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        cred_path = os.path.join(base_dir, "credentials.json")
+        token_path = os.path.join(base_dir, "token.json")
+
         if os.path.exists(cred_path):
-            return "📧 Live Gmail Digest: 0 urgent unread emails."
-        return "📧 Gmail status: No local credentials.json configured for live OAuth sync."
+            try:
+                from google.oauth2.credentials import Credentials
+                from google_auth_oauthlib.flow import InstalledAppFlow
+                from google.auth.transport.requests import Request
+                from googleapiclient.discovery import build
+
+                SCOPES = [
+                    "https://www.googleapis.com/auth/calendar.readonly",
+                    "https://www.googleapis.com/auth/gmail.readonly",
+                ]
+                creds = None
+
+                if os.path.exists(token_path):
+                    creds = Credentials.from_authorized_user_file(token_path, SCOPES)
+
+                if not creds or not creds.valid:
+                    if creds and creds.expired and creds.refresh_token:
+                        creds.refresh(Request())
+                    else:
+                        flow = InstalledAppFlow.from_client_secrets_file(cred_path, SCOPES)
+                        creds = flow.run_local_server(port=0)
+                    with open(token_path, "w") as token_file:
+                        token_file.write(creds.to_json())
+
+                service = build("gmail", "v1", credentials=creds)
+
+                # Query unread primary messages
+                response = service.users().messages().list(
+                    userId="me",
+                    q="is:unread category:primary",
+                    maxResults=max_results,
+                ).execute()
+
+                messages = response.get("messages", [])
+                if not messages:
+                    return "📧 Live Gmail Digest: 0 urgent unread emails in Primary inbox."
+
+                digests = []
+                for msg_item in messages[:max_results]:
+                    msg = service.users().messages().get(
+                        userId="me", id=msg_item["id"], format="full"
+                    ).execute()
+                    headers = msg.get("payload", {}).get("headers", [])
+                    subject = "No Subject"
+                    sender = "Unknown Sender"
+                    for h in headers:
+                        if h["name"].lower() == "subject":
+                            subject = h["value"]
+                        elif h["name"].lower() == "from":
+                            sender = h["value"]
+                    digests.append(f"• From: {sender} | Subject: '{subject}'")
+
+                digest_str = "\n".join(digests)
+                log_action("get_unread_emails", risk_level="ALLOW", status="SUCCESS", details=f"{len(messages)} unread messages")
+                return f"📧 Live Gmail Digest ({len(messages)} unread):\n{digest_str}"
+
+            except ImportError:
+                logger.warning("📧 google-api-python-client not installed for Gmail API.")
+            except Exception as e:
+                logger.error(f"📧 Gmail API error: {e}")
+                return f"❌ Gmail fetch error: {e}"
+
+        return "📧 Gmail status: No credentials.json found in project root. Add credentials to enable live Gmail sync."
 
     def get_github_status_summary(self) -> str:
         """Get git status summary for current workspace repository."""

@@ -29,4 +29,8 @@ jobs:
 
     - name: Run pytest test suite
       run: |
-        pytest tests/ -v
+        pytest tests/ -v --ignore=tests/test_deep_coverage.py
+
+    - name: Run Adversarial Security Verification Suite
+      run: |
+        pytest tests/test_adversarial_security.py -v

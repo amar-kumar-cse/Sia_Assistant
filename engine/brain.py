@@ -80,6 +80,11 @@ def get_news_tool(topic: str = "India technology") -> str:
     from .action_handler import action_handler
     return action_handler.execute("news", topic) or "News fetched"
 
+def get_unread_emails_tool() -> str:
+    """Check for unread emails and return an email digest summary."""
+    from .productivity import productivity_engine
+    return productivity_engine.get_unread_emails()
+
 SIA_TOOLS = [
     open_app_tool,
     get_weather_tool,
@@ -90,6 +95,7 @@ SIA_TOOLS = [
     get_system_info_tool,
     analyze_screen_tool,
     get_news_tool,
+    get_unread_emails_tool,
 ]
 
 

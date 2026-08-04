@@ -69,6 +69,25 @@ class IntentHandler:
                     }
         return {"handled": False}
 
+    def resolve_coreference(self, text: str, last_target: str = "") -> str:
+        """
+        Resolve Hinglish coreference pronouns ('usko', 'woh', 'isse') to last referenced target.
+        Example: 'usko band karo' + last_target 'chrome' -> 'kill process chrome'
+        """
+        if not last_target:
+            return text
+
+        t_lower = text.lower().strip()
+        pronouns = ["usko", "woh", "wo", "isey", "isse", "that app", "it"]
+
+        if any(p in t_lower for p in pronouns):
+            if any(k in t_lower for k in ["band karo", "close", "kill", "stop"]):
+                return f"kill_app {last_target}"
+            elif any(k in t_lower for k in ["kholo", "open", "launch", "start"]):
+                return f"open_app {last_target}"
+
+        return text
+
     # ── Handlers ──────────────────────────────────────────────
     def _handle_time(self) -> str:
         t = datetime.datetime.now().strftime("%I:%M %p")
