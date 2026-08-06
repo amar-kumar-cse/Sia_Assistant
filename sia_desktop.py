@@ -28,6 +28,13 @@ from PyQt5.QtWidgets import (  # type: ignore[reportMissingImports]
     QSlider
 )
 from PyQt5.QtCore import (  # type: ignore[reportMissingImports]
+
+try:
+    from utils.reliability import global_exception_handler
+    sys.excepthook = global_exception_handler
+except ImportError:
+    pass
+
     Qt, QTimer, QThread, pyqtSignal, QPropertyAnimation,
     QEasingCurve, QRect, QSize, QPoint, QPointF, QRectF
 )

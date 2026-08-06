@@ -18,6 +18,29 @@ import soundfile as sf
 from PyQt6.QtCore import QObject, QThread, pyqtSignal
 
 
+try:
+    from utils.reliability import safe_async_call
+except ImportError:
+    def safe_async_call(*args, **kwargs):
+        def decorator(f): return f
+        return decorator
+
+
+@safe_async_call(timeout_seconds=8, fallback_message="Awaaz mein dikkat aa rahi hai")
+async def _generate_tts_file(text: str, voice: str, rate: str, tmp_path: str):
+    communicate = edge_tts.Communicate(text, voice=voice, rate=rate)
+    await communicate.save(tmp_path)
+    return True
+
+
+try:
+    from utils.reliability import safe_async_call
+except ImportError:
+    def safe_async_call(*args, **kwargs):
+        def decorator(f): return f
+        return decorator
+
+
 class SiaVoiceThread(QThread):
     """Background thread: TTS generate karo + audio play karo + amplitude emit karo."""
     speaking_done = pyqtSignal()
@@ -43,21 +66,19 @@ class SiaVoiceThread(QThread):
             loop.close()
             self.speaking_done.emit()
 
+    @safe_async_call(timeout_seconds=10, fallback_message="Awaaz mein dikkat aa rahi hai", max_retries=1)
     async def _speak(self):
         # BUG #24 FIX: .mp3 save karo — edge_tts MP3 format use karta hai
         tmp_path = "temp/speech.mp3"
         os.makedirs("temp", exist_ok=True)
 
-        try:
-            communicate = edge_tts.Communicate(
-                self.text, voice=self.voice, rate=self.rate
-            )
-            await communicate.save(tmp_path)
-        except Exception as exc:
-            print(f"[Voice] TTS generation failed: {exc}")
+        res = await _generate_tts_file(self.text, self.voice, self.rate, tmp_path)
+        if isinstance(res, dict) and not res.get("success", True):
+            print(f"[Voice] TTS generation failed fallback: {res.get('message')}")
             if self.amplitude_callback:
                 self.amplitude_callback(0.0)
             return
+
 
         # BUG #25 FIX: dtype='float32' explicitly — PyAudio paFloat32 se match
         try:

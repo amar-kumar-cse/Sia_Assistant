@@ -560,24 +560,25 @@ def draft_email(to: str = "", subject: str = "", body: str = "") -> str:
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 def empty_recycle_bin() -> str:
-    """Empty the Windows recycle bin."""
+    """Empty the Windows recycle bin cleanly using native Windows C API (no third-party winshell module needed)."""
     try:
         if platform.system() == 'Windows':
-            winshell = None
-            try:
-                import winshell
-                winshell.recycle_bin().empty(confirm=False, show_progress=False, sound=False)
+            import ctypes
+            # SHERB_NOCONFIRMATION (1) | SHERB_NOPROGRESSUI (2) | SHERB_NOSOUND (4) = 7
+            res = ctypes.windll.shell32.SHEmptyRecycleBinW(None, None, 7)
+            if res == 0 or res == 1:
                 return "✅ Recycle Bin saaf kar diya!"
-            except ImportError:
-                # Fallback using PowerShell
-                subprocess.run(
-                    ["powershell", "-Command", "Clear-RecycleBin -Force -ErrorAction SilentlyContinue"],
-                    capture_output=True, creationflags=0x08000000
-                )
-                return "✅ Recycle Bin saaf kar diya!"
+            
+            # Fallback using PowerShell if ctypes returned non-zero
+            subprocess.run(
+                ["powershell", "-Command", "Clear-RecycleBin -Force -ErrorAction SilentlyContinue"],
+                capture_output=True, creationflags=0x08000000
+            )
+            return "✅ Recycle Bin saaf kar diya!"
         return "❌ Sirf Windows pe support hai"
     except Exception as e:
         return f"❌ Recycle bin clear nahi hua: {e}"
+
 
 
 def clear_temp_files() -> str:

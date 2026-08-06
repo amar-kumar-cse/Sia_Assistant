@@ -11,6 +11,8 @@ Sia AI — Main Application Entry Point (PyQt6 FINAL)
 
 import os
 import sys
+import traceback
+import logging
 import asyncio
 from dotenv import load_dotenv
 
@@ -18,6 +20,33 @@ from PyQt6.QtWidgets import QApplication
 from PyQt6.QtCore    import QObject
 
 import qasync
+
+logger = logging.getLogger("sia.crash_guard")
+_sia_app_instance = None
+
+def global_exception_handler(exc_type, exc_value, exc_traceback):
+    """
+    Poore app ka last-line-of-defense.
+    Koi bhi unhandled crash yahan pakda jaayega — app band NAHI hogi.
+    """
+    if issubclass(exc_type, KeyboardInterrupt):
+        sys.__excepthook__(exc_type, exc_value, exc_traceback)
+        return
+
+    error_details = "".join(traceback.format_exception(exc_type, exc_value, exc_traceback))
+    logger.critical(f"UNHANDLED EXCEPTION:\n{error_details}")
+    print(f"[CrashGuard] Caught unhandled exception: {exc_value}")
+
+    # Show notification & reset state safely without crashing
+    try:
+        if _sia_app_instance and hasattr(_sia_app_instance, 'bubble'):
+            _sia_app_instance.bubble.show_message("Sia ko thoda issue hua, main theek ho rahi hoon 🙂", "normal")
+        if _sia_app_instance and hasattr(_sia_app_instance, 'character'):
+            _sia_app_instance.character.set_state("idle")
+    except Exception as recovery_err:
+        print(f"[CrashGuard] Recovery notice error: {recovery_err}")
+
+sys.excepthook = global_exception_handler
 
 # ── Engine imports with graceful fallbacks ───────────────────────
 from engine.brain import GeminiBrain
@@ -70,6 +99,8 @@ from overlay import SiaOverlay
 class SiaApp(QObject):
     def __init__(self):
         super().__init__()
+        global _sia_app_instance
+        _sia_app_instance = self
 
     # ── Signal wiring ────────────────────────────────────────────
 
@@ -267,6 +298,14 @@ class SiaApp(QObject):
         self.character.set_state("idle")
 
 
+# ── App-wide crash safety net ─────────────────────────────────────
+try:
+    from utils.reliability import global_exception_handler
+    sys.excepthook = global_exception_handler
+except ImportError:
+    pass
+
+
 # ════════════════════════════════════════════════════════════════
 def main():
     # High-DPI support (PyQt6 handles it automatically, but explicit is safer)
@@ -275,6 +314,12 @@ def main():
 
     loop = qasync.QEventLoop(app)
     asyncio.set_event_loop(loop)
+
+    def handle_async_exception(loop, context):
+        msg = context.get("exception", context.get("message"))
+        print(f"⚠️ [SIA ASYNC GUARD] Unhandled async task exception caught: {msg}")
+
+    loop.set_exception_handler(handle_async_exception)
 
     sia = SiaApp()
 
@@ -285,3 +330,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

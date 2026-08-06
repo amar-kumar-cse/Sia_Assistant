@@ -99,6 +99,13 @@ SIA_TOOLS = [
 ]
 
 
+try:
+    from utils.reliability import safe_async_call
+except ImportError:
+    def safe_async_call(*args, **kwargs):
+        def decorator(f): return f
+        return decorator
+
 class GeminiBrain:
     def __init__(self):
         load_dotenv()
@@ -155,6 +162,7 @@ class GeminiBrain:
             pass
         return None
 
+    @safe_async_call(timeout_seconds=12, fallback_message={'emotion': 'error', 'text': 'Gemini se response nahi mil paya Hero, dobara try karti hoon'}, max_retries=1)
     def get_response(self, text, history=[]):
         if os.getenv("SIA_LOCAL_ONLY", "false").lower() in ("true", "1", "yes"):
             local_res = self._query_ollama(text)
@@ -282,7 +290,22 @@ class GeminiBrain:
 
 _default_brain = GeminiBrain()
 
+try:
+    from utils.reliability import safe_async_call, safe_sync_call
+except ImportError:
+    # Graceful fallback if utils module not found
+    def safe_async_call(*args, **kwargs):
+        def decorator(f): return f
+        return decorator
+    def safe_sync_call(*args, **kwargs):
+        def decorator(f): return f
+        return decorator
 
+
+@safe_sync_call(
+    fallback_message="Gemini response failure",
+    fallback_value={'emotion': 'error', 'text': 'Hero, Gemini se response nahi mil paya. Dobara try karti hoon!'}
+)
 def think(prompt: str, history: list = []) -> dict:
     """
     Think and generate response from Gemini model with emotion classification.
@@ -291,11 +314,25 @@ def think(prompt: str, history: list = []) -> dict:
     return _default_brain.get_response(prompt, history)
 
 
+@safe_async_call(
+    timeout_seconds=10,
+    fallback_message="Gemini se response nahi mil paya",
+    fallback_value={'emotion': 'error', 'text': 'Hero, Gemini se response nahi mil paya. Thodi der mein try karo!'}
+)
+async def async_think(prompt: str, history: list = []) -> dict:
+    """
+    Async version of think() wrapped with safe_async_call for non-blocking UI execution.
+    """
+    import asyncio
+    return await asyncio.to_thread(_default_brain.get_response, prompt, history)
+
+
 def think_streaming(prompt: str, history: list = []):
     """
     Stream response tokens from Gemini model for low-latency TTS synthesis and GUI display.
     Yields chunks of generated text as strings.
     """
     return _default_brain.get_response_stream(prompt, history)
+
 
 

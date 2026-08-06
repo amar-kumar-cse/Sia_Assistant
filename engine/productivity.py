@@ -16,6 +16,13 @@ from .memory import SiaMemory, get_facts
 from .logger import get_logger
 from .audit_logger import log_action
 
+try:
+    from utils.reliability import safe_async_call
+except ImportError:
+    def safe_async_call(*args, **kwargs):
+        def decorator(f): return f
+        return decorator
+
 logger = get_logger(__name__)
 
 
@@ -80,6 +87,7 @@ class ProductivityEngine:
             return f"✅ Done Hero! Task set: '{task_description}'"
         return "❌ Remind set karne mein error aaya."
 
+    @safe_async_call(timeout_seconds=6, fallback_message=[{"title": "Calendar access nahi mil paya abhi", "time": "N/A"}], max_retries=1)
     def get_calendar_events(self, max_results: int = 10) -> List[Dict[str, str]]:
         """
         Fetch today's events from Google Calendar via OAuth2.
@@ -175,6 +183,7 @@ class ProductivityEngine:
             pass
         return [{"title": "No Google OAuth credentials.json configured. Add it to project root to enable live calendar.", "time": "N/A"}]
 
+    @safe_async_call(timeout_seconds=6, fallback_message="Gmail check nahi ho paya abhi", max_retries=1)
     def get_unread_emails(self, max_results: int = 5) -> str:
         """
         Fetch unread Gmail summary via OAuth2 API (gmail.readonly scope).

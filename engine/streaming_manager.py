@@ -13,6 +13,14 @@ from typing import Generator, Callable, Optional
 
 logger = logging.getLogger(__name__)
 
+try:
+    from utils.reliability import safe_sync_call
+except ImportError:
+    def safe_sync_call(*args, **kwargs):
+        def decorator(f): return f
+        return decorator
+
+
 class StreamingManager:
     """
     Coordinates streaming from Gemini to ElevenLabs for instant responses.
@@ -41,8 +49,10 @@ class StreamingManager:
         # ✅ FIX #6: Track threads for proper cleanup
         self._text_thread: Optional[threading.Thread] = None
         self._voice_thread: Optional[threading.Thread] = None
-        
+
+    @safe_sync_call(fallback_message="Streaming flow failure", fallback_value=False)
     def process_stream(self, text_generator: Generator, voice_callback: Callable, timeout_seconds: int = 120) -> bool:
+
         """
         ✅ FIX #6: Main streaming pipeline coordinator with proper timeout and cleanup.
         

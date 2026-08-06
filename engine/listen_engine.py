@@ -210,9 +210,17 @@ def _listen_loop(recognizer, source, wake_word, timeout_seconds=2, phrase_limit=
     
     # ✅ FIX #3: Exit loop gracefully instead of infinite loop
     logger.warning(f"Max consecutive errors ({max_consecutive_errors}) reached in wake word detection")
-    return False
+try:
+    from utils.reliability import safe_sync_call
+except ImportError:
+    def safe_sync_call(*args, **kwargs):
+        def decorator(f): return f
+        return decorator
 
+
+@safe_sync_call(fallback_message="Audio listen nahi ho paya", fallback_value=None)
 def listen(use_whisper=False, max_retries=MAX_RECOGNITION_RETRIES):
+
     """
     Listens to the microphone with enhanced error handling and retry logic.
     
