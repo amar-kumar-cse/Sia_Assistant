@@ -3,11 +3,13 @@ engine/wake_word.py — Continuous Background Wake Word Detection
 Bugs fixed:
   - BUG #28: stop() → quit() + wait() taaki thread properly terminate ho
   - BUG #29: adjust_for_ambient_noise 1s → 0.3s (startup delay kam karo)
+  - PyQt5 → PyQt6 migration
+  - Added SpeechRecognizer class for main.py
 """
 
 import os
 import speech_recognition as sr
-from PyQt5.QtCore import QThread, pyqtSignal
+from PyQt6.QtCore import QThread, pyqtSignal
 
 
 class WakeWordDetector(QThread):
@@ -54,3 +56,41 @@ class WakeWordDetector(QThread):
         self.running = False
         self.quit()
         self.wait(2000)  # Max 2 sec wait karo
+
+
+class SpeechRecognizer(QThread):
+    """Speech-to-text recognizer thread. Emits `result(str)` on success, `error()` on failure."""
+    result = pyqtSignal(str)
+    error = pyqtSignal()
+
+    def __init__(self):
+        super().__init__()
+
+    def run(self):
+        recognizer = sr.Recognizer()
+        recognizer.energy_threshold = 300
+        recognizer.dynamic_energy_threshold = True
+        recognizer.pause_threshold = 0.6
+
+        try:
+            with sr.Microphone() as source:
+                recognizer.adjust_for_ambient_noise(source, duration=0.2)
+                audio = recognizer.listen(source, timeout=5, phrase_time_limit=10)
+
+                try:
+                    text = recognizer.recognize_google(audio, language="hi-IN")
+                    if text:
+                        self.result.emit(text)
+                    else:
+                        self.error.emit()
+                except sr.UnknownValueError:
+                    self.error.emit()
+                except sr.RequestError as e:
+                    print(f"[SpeechRecognizer] API error: {e}")
+                    self.error.emit()
+        except sr.WaitTimeoutError:
+            self.error.emit()
+        except Exception as exc:
+            print(f"[SpeechRecognizer] Error: {exc}")
+            self.error.emit()
+

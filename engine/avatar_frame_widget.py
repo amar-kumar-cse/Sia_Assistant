@@ -4,9 +4,9 @@ from __future__ import annotations
 
 from typing import Dict
 
-from PyQt5.QtCore import Qt, pyqtProperty
-from PyQt5.QtGui import QPainter, QPixmap
-from PyQt5.QtWidgets import QLabel
+from PyQt6.QtCore import Qt, pyqtProperty
+from PyQt6.QtGui import QPainter, QPixmap
+from PyQt6.QtWidgets import QLabel
 
 
 class AvatarFrameWidget(QLabel):
@@ -19,7 +19,7 @@ class AvatarFrameWidget(QLabel):
         self.current_to = "idle"
         self.current_alpha = 255
         self._breath_scale = 1.0
-        self.setAttribute(Qt.WA_TranslucentBackground, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         self.setStyleSheet("background: transparent;")
 
     @pyqtProperty(float)
@@ -41,7 +41,7 @@ class AvatarFrameWidget(QLabel):
         if self.width() <= 0 or self.height() <= 0:
             return
         canvas = QPixmap(self.width(), self.height())
-        canvas.fill(Qt.transparent)
+        canvas.fill(Qt.GlobalColor.transparent)
 
         px_from = self.frame_map.get(self.current_from) or self.frame_map.get("idle")
         px_to = self.frame_map.get(self.current_to) or self.frame_map.get("idle")
@@ -49,7 +49,7 @@ class AvatarFrameWidget(QLabel):
             return
 
         p = QPainter(canvas)
-        p.setRenderHint(QPainter.SmoothPixmapTransform)
+        p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
 
         w, h = self.width(), self.height()
         p.translate(w / 2.0, h / 2.0)
@@ -57,9 +57,10 @@ class AvatarFrameWidget(QLabel):
         p.translate(-w / 2.0, -h / 2.0)
 
         p.setOpacity((255 - self.current_alpha) / 255.0)
-        p.drawPixmap(0, 0, px_from.scaled(w, h, Qt.IgnoreAspectRatio, Qt.SmoothTransformation))
+        p.drawPixmap(0, 0, px_from.scaled(w, h, Qt.AspectRatioMode.IgnoreAspectRatio, Qt.TransformationMode.SmoothTransformation))
         p.setOpacity(self.current_alpha / 255.0)
-        p.drawPixmap(0, 0, px_to.scaled(w, h, Qt.IgnoreAspectRatio, Qt.SmoothTransformation))
+        p.drawPixmap(0, 0, px_to.scaled(w, h, Qt.AspectRatioMode.IgnoreAspectRatio, Qt.TransformationMode.SmoothTransformation))
         p.end()
 
         self.setPixmap(canvas)
+

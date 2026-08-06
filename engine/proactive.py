@@ -4,7 +4,7 @@ Periodically analyzes the screen and makes smart comments.
 """
 
 import time
-from PyQt5.QtCore import QObject, pyqtSignal, QTimer
+from PyQt6.QtCore import QObject, pyqtSignal, QTimer
 
 class ProactiveEngine(QObject):
     

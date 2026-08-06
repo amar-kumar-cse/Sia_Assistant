@@ -226,9 +226,23 @@ def _safe_remove(path: str):
         pass
 
 
-def capture_screen() -> Optional[str]:
+def get_all_monitors_info() -> list[dict]:
+    """Get list of active monitors with index and dimensions."""
+    try:
+        import mss
+        with mss.mss() as sct:
+            return [
+                {"index": idx, "left": m["left"], "top": m["top"], "width": m["width"], "height": m["height"]}
+                for idx, m in enumerate(sct.monitors)
+            ]
+    except Exception:
+        return [{"index": 0, "left": 0, "top": 0, "width": 1920, "height": 1080}]
+
+
+def capture_screen(monitor_index: int = 1) -> Optional[str]:
     """
-    Captures a screenshot of the entire screen with privacy exclusion check.
+    Captures a screenshot of the specified monitor (or primary display) with privacy check.
+    Supports multi-monitor setups (monitor_index=1, 2, etc.).
     Returns the path to the saved screenshot image.
     """
     if _VISION_PAUSED:
@@ -241,20 +255,32 @@ def capture_screen() -> Optional[str]:
         return None
 
     try:
-        from PIL import ImageGrab
-        
-        screenshot = ImageGrab.grab()
-        
-        # Save to temp directory
-        temp_path = os.path.join(tempfile.gettempdir(), f"sia_screen_{int(time.time())}.png")
-        screenshot.save(temp_path, "PNG")
-        
-        print(f"📸 Screenshot captured: {temp_path}")
-        return temp_path
-        
+        import mss
+        with mss.mss() as sct:
+            monitors = sct.monitors
+            target_monitor = monitors[monitor_index] if 0 <= monitor_index < len(monitors) else monitors[0]
+            sct_img = sct.grab(target_monitor)
+
+            from PIL import Image
+            img = Image.frombytes("RGB", sct_img.size, sct_img.bgra, "raw", "BGRX")
+
+            temp_path = os.path.join(tempfile.gettempdir(), f"sia_screen_{int(time.time())}.png")
+            img.save(temp_path, "PNG")
+
+            print(f"📸 Screenshot captured (monitor {monitor_index}): {temp_path}")
+            return temp_path
+
     except Exception as e:
-        print(f"❌ Screenshot failed: {e}")
-        return None
+        # Fallback to PIL ImageGrab
+        try:
+            from PIL import ImageGrab
+            screenshot = ImageGrab.grab()
+            temp_path = os.path.join(tempfile.gettempdir(), f"sia_screen_{int(time.time())}.png")
+            screenshot.save(temp_path, "PNG")
+            return temp_path
+        except Exception as err:
+            print(f"❌ Screenshot failed: {err}")
+            return None
 
 
 def capture_active_window() -> Optional[str]:

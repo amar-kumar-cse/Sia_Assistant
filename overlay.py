@@ -47,6 +47,16 @@ class SiaOverlay(QMainWindow):
         self.character = SiaCharacterWidget()   # top-level (not child)
         self.character.base_x = self.CHAR_X
         self.character.base_y = self.CHAR_Y
+
+        # ── 4. Chat bubble ─────────────────────────────────────────
+        self.bubble = SiaChatBubble()
+        self.bubble.setWindowFlags(
+            Qt.WindowType.FramelessWindowHint |
+            Qt.WindowType.WindowStaysOnTopHint |
+            Qt.WindowType.Tool
+        )
+        self.bubble.move(self.BUBBLE_X, self.BUBBLE_Y)
+
         # ── 5. Vision Observation Active Badge State ─────────────────────────────
         self._vision_active = False
         self._vision_pulse = 0
@@ -147,3 +157,4 @@ class SiaOverlay(QMainWindow):
     def show(self):
         super().show()
         self.character.show()
+        self.bubble.show()

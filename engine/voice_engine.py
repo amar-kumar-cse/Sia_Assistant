@@ -171,6 +171,8 @@ EMOTION_VOICE_MAP = {
     "SURPRISED": {"rate": "+8%",   "pitch": "+40Hz",  "voice": "hi-IN-SwaraNeural"},
     "ANGRY":     {"rate": "+3%",   "pitch": "-8Hz",   "voice": "hi-IN-SwaraNeural"},
     "STRESSED":  {"rate": "-3%",   "pitch": "-3Hz",   "voice": "hi-IN-SwaraNeural"},
+    "ALERT":     {"rate": "+5%",   "pitch": "+18Hz",  "voice": "hi-IN-SwaraNeural"},
+    "CONCERNED": {"rate": "-5%",   "pitch": "-10Hz",  "voice": "hi-IN-SwaraNeural"},
 }
 
 def _get_emotion_settings(emotion: Optional[str]) -> Dict[str, str]:

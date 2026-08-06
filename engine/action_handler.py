@@ -31,6 +31,7 @@ class ActionHandler(BaseService):
         # OS automation handlers
         self._handlers.update({
             'open_app': self._handle_open_app,
+            'kill_app': self._handle_kill_app,
             'generate_script': self._handle_generate_script,
             'volume': self._handle_volume,
             'system_info': self._handle_system_info,
@@ -159,6 +160,17 @@ class ActionHandler(BaseService):
             return None
         except Exception as e:
             return self._handle_error(e, "app opening", "App open failed")
+
+    def _handle_kill_app(self, cmd: str) -> Optional[str]:
+        """Kill / force-close an application by name."""
+        try:
+            from . import os_automation
+            app_name = self._extract_app_name(cmd)
+            if app_name:
+                return os_automation.kill_app(app_name)
+            return None
+        except Exception as e:
+            return self._handle_error(e, "app killing", "App kill failed")
 
     def _handle_generate_script(self, cmd: str) -> Optional[str]:
         """Handle PC automation scripting request."""

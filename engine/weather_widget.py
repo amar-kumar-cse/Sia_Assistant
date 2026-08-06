@@ -5,15 +5,15 @@ Glassmorphism-style transparent widget with live weather data.
 
 import math
 import time
-from PyQt5.QtWidgets import (
+from PyQt6.QtWidgets import (
     QWidget, QLabel, QVBoxLayout, QHBoxLayout,
     QGraphicsDropShadowEffect, QGraphicsOpacityEffect
 )
-from PyQt5.QtCore import (
+from PyQt6.QtCore import (
     Qt, QTimer, QPropertyAnimation, QEasingCurve,
     QPoint, QThread, pyqtSignal
 )
-from PyQt5.QtGui import (
+from PyQt6.QtGui import (
     QColor, QFont, QPainter, QLinearGradient,
     QPainterPath, QPen, QBrush, QRadialGradient
 )
@@ -91,11 +91,11 @@ class WeatherWidget(QWidget):
 
         # Window flags: frameless, on-top, transparent
         self.setWindowFlags(
-            Qt.FramelessWindowHint |
-            Qt.WindowStaysOnTopHint |
-            Qt.Tool
+            Qt.WindowType.FramelessWindowHint |
+            Qt.WindowType.WindowStaysOnTopHint |
+            Qt.WindowType.Tool
         )
-        self.setAttribute(Qt.WA_TranslucentBackground)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setFixedSize(340, 240)
 
         # State
@@ -105,7 +105,7 @@ class WeatherWidget(QWidget):
         self._build_ui()
 
         # Position: top-right corner of screen
-        from PyQt5.QtWidgets import QApplication
+        from PyQt6.QtWidgets import QApplication
         screen = QApplication.primaryScreen().geometry()
         self.move(screen.width() - self.width() - 30, 60)
 
@@ -146,14 +146,14 @@ class WeatherWidget(QWidget):
         self.anim.setDuration(800)
         self.anim.setStartValue(1.0)
         self.anim.setEndValue(0.0)
-        self.anim.setEasingCurve(QEasingCurve.OutCubic)
+        self.anim.setEasingCurve(QEasingCurve.Type.OutCubic)
         self.anim.finished.connect(self.close)
         self.anim.start()
 
     def paintEvent(self, event):
         """Custom glassmorphism painting."""
         painter = QPainter(self)
-        painter.setRenderHint(QPainter.Antialiasing)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         w, h = self.width(), self.height()
 
         # ── Glass background ──
@@ -175,29 +175,29 @@ class WeatherWidget(QWidget):
         inner.setColorAt(0.0, QColor(100, 150, 255, glow_alpha))
         inner.setColorAt(1.0, QColor(0, 0, 0, 0))
         painter.setBrush(QBrush(inner))
-        painter.setPen(Qt.NoPen)
+        painter.setPen(Qt.PenStyle.NoPen)
         painter.drawPath(path)
 
         if not self.weather_data:
             # Loading state
-            font = QFont("Segoe UI", 16, QFont.Bold)
+            font = QFont("Segoe UI", 16, QFont.Weight.Bold)
             painter.setFont(font)
             painter.setPen(QColor(255, 255, 255, 200))
-            painter.drawText(0, 0, w, h, Qt.AlignCenter, f"⏳ Loading weather for {self.city}...")
+            painter.drawText(0, 0, w, h, Qt.AlignmentFlag.AlignCenter, f"⏳ Loading weather for {self.city}...")
             painter.end()
             return
 
         d = self.weather_data
 
         # ── Header: City + Close btn ──
-        header_font = QFont("Segoe UI", 13, QFont.Bold)
+        header_font = QFont("Segoe UI", 13, QFont.Weight.Bold)
         painter.setFont(header_font)
         painter.setPen(QColor(0, 255, 204, 230))
         painter.drawText(20, 25, f"📍 {d['city']}")
 
         # Close X
         painter.setPen(QColor(255, 100, 100, 180))
-        close_font = QFont("Segoe UI", 14, QFont.Bold)
+        close_font = QFont("Segoe UI", 14, QFont.Weight.Bold)
         painter.setFont(close_font)
         painter.drawText(w - 35, 25, "✕")
 
@@ -207,7 +207,7 @@ class WeatherWidget(QWidget):
         painter.setPen(QColor(255, 255, 255))
         painter.drawText(20, 95, d["icon"])
 
-        temp_font = QFont("Segoe UI", 36, QFont.Bold)
+        temp_font = QFont("Segoe UI", 36, QFont.Weight.Bold)
         painter.setFont(temp_font)
         painter.setPen(QColor(255, 255, 255, 250))
         painter.drawText(90, 95, f"{d['temp']}°C")
@@ -248,13 +248,15 @@ class WeatherWidget(QWidget):
     def mousePressEvent(self, event):
         """Close on click anywhere, or support dragging."""
         # Check if click is on close button area
-        if event.x() > self.width() - 45 and event.y() < 35:
+        pos = event.position()
+        if pos.x() > self.width() - 45 and pos.y() < 35:
             self.close()
         else:
             # Enable dragging
-            self._drag_pos = event.globalPos() - self.frameGeometry().topLeft()
+            self._drag_pos = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
 
     def mouseMoveEvent(self, event):
         """Drag the widget."""
         if hasattr(self, '_drag_pos'):
-            self.move(event.globalPos() - self._drag_pos)
+            self.move(event.globalPosition().toPoint() - self._drag_pos)
+

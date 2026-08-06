@@ -159,23 +159,29 @@ def get_command_policy(command_text: str) -> Dict[str, str]:
 def sanitize_screen_text(text: str) -> str:
     """
     Sanitize text/OCR extracted from screen captures to mitigate prompt injection attacks.
-    Neutralizes attempt markers, tag breaking strings, and system override patterns.
+    Neutralizes attempt markers, tag breaking strings, zero-width evasion characters, and nested system override patterns.
     """
     if not text or not isinstance(text, str):
         return ""
 
     sanitized = text
 
+    # Strip zero-width evasion characters and invisible unicode formatting
+    zero_width_chars = ['\u200b', '\u200c', '\u200d', '\ufeff', '\u200e', '\u200f']
+    for zw in zero_width_chars:
+        sanitized = sanitized.replace(zw, '')
+
     # Escape tag breaks to prevent escaping out of untrusted wrappers
     sanitized = re.sub(r'</?untrusted[_\-\w]*>', '[TAG_ESCAPED]', sanitized, flags=re.IGNORECASE)
 
-    # Neutralize active prompt injection directives
+    # Neutralize active prompt injection directives and nested model simulations
     injection_patterns = [
         r'(?i)ignore\s+(?:all\s+)?previous\s+instructions',
         r'(?i)system\s+prompt\s*:',
         r'(?i)you\s+are\s+now\s+a',
         r'(?i)disregard\s+above',
         r'(?i)override\s+safety',
+        r'(?i)(?:sia|assistant|system)\s*:\s*(?:format|delete|kill|execute)',
     ]
     for pattern in injection_patterns:
         sanitized = re.sub(pattern, '[INJECTION_NEUTRALIZED]', sanitized)

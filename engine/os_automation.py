@@ -130,6 +130,87 @@ def open_app(app_name: str) -> str:
     return f"❌ '{app_name}' nahi mila. Check karo agar installed hai."
 
 
+def kill_app(app_name: str) -> str:
+    """
+    Force-close / kill a running application by name using taskkill.
+
+    Args:
+        app_name: Name of the process to kill (e.g. 'chrome', 'notepad')
+
+    Returns:
+        Status message
+    """
+    app_key = app_name.lower().strip()
+
+    # Common process name mapping
+    PROCESS_MAP = {
+        "chrome": "chrome.exe",
+        "google chrome": "chrome.exe",
+        "firefox": "firefox.exe",
+        "edge": "msedge.exe",
+        "microsoft edge": "msedge.exe",
+        "brave": "brave.exe",
+        "notepad": "notepad.exe",
+        "notepad++": "notepad++.exe",
+        "vscode": "Code.exe",
+        "vs code": "Code.exe",
+        "visual studio code": "Code.exe",
+        "spotify": "Spotify.exe",
+        "discord": "Discord.exe",
+        "telegram": "Telegram.exe",
+        "whatsapp": "WhatsApp.exe",
+        "vlc": "vlc.exe",
+        "task manager": "taskmgr.exe",
+        "taskmgr": "taskmgr.exe",
+        "explorer": "explorer.exe",
+        "file explorer": "explorer.exe",
+        "calculator": "CalculatorApp.exe",
+        "calc": "CalculatorApp.exe",
+        "paint": "mspaint.exe",
+        "powershell": "powershell.exe",
+        "cmd": "cmd.exe",
+    }
+
+    process_name = PROCESS_MAP.get(app_key, f"{app_key}.exe" if not app_key.endswith(".exe") else app_key)
+
+    if platform.system() == "Windows":
+        try:
+            result = subprocess.run(
+                ["taskkill", "/f", "/im", process_name],
+                capture_output=True,
+                text=True,
+                timeout=8,
+                creationflags=0x08000000,
+            )
+            if result.returncode == 0:
+                return f"✅ '{app_name}' band kar diya Hero!"
+            else:
+                # Try with user-provided name directly
+                result2 = subprocess.run(
+                    ["taskkill", "/f", "/im", app_name if app_name.endswith(".exe") else f"{app_name}.exe"],
+                    capture_output=True,
+                    text=True,
+                    timeout=8,
+                    creationflags=0x08000000,
+                )
+                if result2.returncode == 0:
+                    return f"✅ '{app_name}' band kar diya Hero!"
+                logger.warning(f"taskkill failed: {result.stderr}")
+                return f"❌ '{app_name}' nahi mila ya pehle se band hai Hero."
+        except subprocess.TimeoutExpired:
+            return f"❌ '{app_name}' kill karne mein timeout ho gayi."
+        except Exception as e:
+            logger.error(f"kill_app error: {e}")
+            return f"❌ App kill nahi ho paya: {e}"
+    else:
+        # Unix fallback
+        try:
+            subprocess.run(["pkill", "-f", app_name], check=False, timeout=5)
+            return f"✅ '{app_name}' band kar diya!"
+        except Exception as e:
+            return f"❌ App kill nahi ho paya: {e}"
+
+
 # Command whitelist for security
 ALLOWED_COMMANDS = {
     "shutdown", "cancel", "restart", "sleep", "lock",

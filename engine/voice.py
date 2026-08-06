@@ -15,7 +15,7 @@ import edge_tts
 import numpy as np
 import pyaudio
 import soundfile as sf
-from PyQt5.QtCore import QObject, QThread, pyqtSignal
+from PyQt6.QtCore import QObject, QThread, pyqtSignal
 
 
 class SiaVoiceThread(QThread):

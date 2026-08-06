@@ -1,6 +1,6 @@
 import sys
-from PyQt5.QtWidgets import QWidget, QLabel, QVBoxLayout, QGraphicsOpacityEffect, QApplication
-from PyQt5.QtCore import Qt, QTimer, QPropertyAnimation, QRect
+from PyQt6.QtWidgets import QWidget, QLabel, QVBoxLayout, QGraphicsOpacityEffect, QApplication
+from PyQt6.QtCore import Qt, QTimer, QPropertyAnimation, QRect
 
 class ToastNotification(QWidget):
     """A floating, transparent visual alert that disappears after 5 seconds."""
@@ -10,12 +10,12 @@ class ToastNotification(QWidget):
         
         # Frameless, Always on Top, Borderless, Tool window
         self.setWindowFlags(
-            Qt.FramelessWindowHint | 
-            Qt.WindowStaysOnTopHint | 
-            Qt.Tool | 
-            Qt.WindowTransparentForInput
+            Qt.WindowType.FramelessWindowHint | 
+            Qt.WindowType.WindowStaysOnTopHint | 
+            Qt.WindowType.Tool | 
+            Qt.WindowType.WindowTransparentForInput
         )
-        self.setAttribute(Qt.WA_TranslucentBackground)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         
         self.duration = duration
         
@@ -36,7 +36,7 @@ class ToastNotification(QWidget):
                 border: 1px solid rgba(0, 255, 204, 0.4);
             }
         """)
-        self.label.setAlignment(Qt.AlignCenter)
+        self.label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.label.setWordWrap(True)
         layout.addWidget(self.label)
         self.setLayout(layout)
@@ -87,3 +87,4 @@ def show_toast(message, duration=5000):
         QApplication.instance()._current_toast = toast
     else:
         print("[Toast Fallback]:", message)
+
