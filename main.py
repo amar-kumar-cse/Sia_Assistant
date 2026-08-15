@@ -300,7 +300,7 @@ class SiaApp(QObject):
 
 # ── App-wide crash safety net ─────────────────────────────────────
 try:
-    from utils.reliability import global_exception_handler
+    from utils.reliability import global_exception_handler, asyncio_exception_handler, register_crash_guard_callbacks
     sys.excepthook = global_exception_handler
 except ImportError:
     pass
@@ -308,20 +308,34 @@ except ImportError:
 
 # ════════════════════════════════════════════════════════════════
 def main():
-    # High-DPI support (PyQt6 handles it automatically, but explicit is safer)
+    # High-DPI support
     app = QApplication(sys.argv)
     app.setApplicationName("Sia AI Assistant")
 
     loop = qasync.QEventLoop(app)
     asyncio.set_event_loop(loop)
 
-    def handle_async_exception(loop, context):
-        msg = context.get("exception", context.get("message"))
-        print(f"⚠️ [SIA ASYNC GUARD] Unhandled async task exception caught: {msg}")
-
-    loop.set_exception_handler(handle_async_exception)
-
     sia = SiaApp()
+
+    # Wire UI notification & avatar reset callbacks to reliability crash guard
+    def _ui_notify(msg: str):
+        if hasattr(sia, 'bubble') and sia.bubble:
+            sia.bubble.show_message(msg, "normal")
+
+    def _avatar_reset():
+        if hasattr(sia, 'character') and sia.character:
+            sia.character.set_state("idle")
+
+    try:
+        register_crash_guard_callbacks(ui_notify_fn=_ui_notify, avatar_reset_fn=_avatar_reset)
+        loop.set_exception_handler(asyncio_exception_handler)
+    except Exception:
+        def handle_async_exception(loop, context):
+            msg = context.get("exception", context.get("message"))
+            print(f"⚠️ [SIA ASYNC GUARD] Unhandled async task exception caught: {msg}")
+            _ui_notify("Sia task recovered from error.")
+            _avatar_reset()
+        loop.set_exception_handler(handle_async_exception)
 
     with loop:
         loop.run_until_complete(sia.boot())

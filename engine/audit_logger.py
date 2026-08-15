@@ -23,7 +23,7 @@ def _now() -> str:
 
 def _init_audit_table():
     with _audit_lock:
-        conn = sqlite3.connect(_DB_PATH, check_same_thread=False)
+        conn = sqlite3.connect(_DB_PATH, check_same_thread=False, timeout=10.0)
         conn.row_factory = sqlite3.Row
         try:
             conn.execute("""
@@ -55,7 +55,7 @@ def log_action(
     """Log an executed system action into audit trail."""
     with _audit_lock:
         try:
-            conn = sqlite3.connect(_DB_PATH, check_same_thread=False)
+            conn = sqlite3.connect(_DB_PATH, check_same_thread=False, timeout=10.0)
             try:
                 conn.execute(
                     "INSERT INTO audit_logs (timestamp, action_name, risk_level, status, details, user_confirmed) "
@@ -76,7 +76,7 @@ def get_recent_audit_logs(limit: int = 20) -> List[Dict[str, Any]]:
     """Retrieve recent action audit log history."""
     with _audit_lock:
         try:
-            conn = sqlite3.connect(_DB_PATH, check_same_thread=False)
+            conn = sqlite3.connect(_DB_PATH, check_same_thread=False, timeout=10.0)
             conn.row_factory = sqlite3.Row
             try:
                 rows = conn.execute(

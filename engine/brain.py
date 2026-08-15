@@ -6,8 +6,17 @@ Handles Gemini integration, prompt management, and API key rotation.
 import os
 import threading
 from typing import Optional, List, Dict, Any
-import google.generativeai as genai
 from dotenv import load_dotenv
+
+try:
+    from utils.reliability import safe_async_call, safe_sync_call
+except ImportError:
+    def safe_async_call(*args, **kwargs):
+        def decorator(f): return f
+        return decorator
+    def safe_sync_call(*args, **kwargs):
+        def decorator(f): return f
+        return decorator
 
 SIA_SYSTEM_PROMPT = """
 Tu Sia hai — ek friendly, witty, caring Indian AI desktop companion.
@@ -162,7 +171,7 @@ class GeminiBrain:
             pass
         return None
 
-    @safe_async_call(timeout_seconds=12, fallback_message={'emotion': 'error', 'text': 'Gemini se response nahi mil paya Hero, dobara try karti hoon'}, max_retries=1)
+    @safe_sync_call(timeout_seconds=15, fallback_value={'emotion': 'error', 'text': 'Gemini se response nahi mil paya Hero, dobara try karti hoon'}, max_retries=1)
     def get_response(self, text, history=[]):
         if os.getenv("SIA_LOCAL_ONLY", "false").lower() in ("true", "1", "yes"):
             local_res = self._query_ollama(text)

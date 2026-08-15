@@ -10,7 +10,15 @@ import threading
 from datetime import datetime
 from typing import Optional
 
+try:
+    from utils.reliability import safe_sync_call
+except ImportError:
+    def safe_sync_call(*args, **kwargs):
+        def decorator(f): return f
+        return decorator
 
+
+@safe_sync_call(timeout_seconds=8.0, fallback_value="⏱️ Web search request timeout ho gaya. Network check karein.")
 def search_web(query, num_results=3, timeout_seconds: int = 5) -> str:
     """
     Search the web using DuckDuckGo (no API key needed).
@@ -75,6 +83,7 @@ def search_web(query, num_results=3, timeout_seconds: int = 5) -> str:
         return f"❌ Web search failed: {str(e)[:100]}"
 
 
+@safe_sync_call(timeout_seconds=8.0, fallback_value="📰 News fetch timeout ho gaya. Network verify karein.")
 def get_latest_news(topic="technology India", num_results=5):
     """
     Get latest news headlines on a topic.
@@ -122,6 +131,7 @@ def get_latest_news(topic="technology India", num_results=5):
         return f"❌ News fetch failed: {str(e)[:100]}"
 
 
+@safe_sync_call(timeout_seconds=8.0, fallback_value="💻 Coding docs search timeout ho gaya.")
 def search_coding_docs(query, language="python"):
     """
     Search for coding-related documentation and solutions.

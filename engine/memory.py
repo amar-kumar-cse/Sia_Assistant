@@ -33,9 +33,9 @@ def _now() -> str:
 
 @contextlib.contextmanager
 def _get_db(db_path: Optional[str] = None):
-    """Context manager returning a sqlite3 connection with Row factory."""
+    """Context manager returning a sqlite3 connection with Row factory and busy timeout."""
     path = db_path or _DB_PATH
-    conn = sqlite3.connect(path, check_same_thread=False)
+    conn = sqlite3.connect(path, check_same_thread=False, timeout=10.0)
     conn.row_factory = sqlite3.Row
     try:
         yield conn
@@ -146,7 +146,7 @@ class SiaMemory:
         _init_db(self.db_path)
 
     def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.db_path, check_same_thread=False)
+        conn = sqlite3.connect(self.db_path, check_same_thread=False, timeout=10.0)
         conn.row_factory = sqlite3.Row
         return conn
 

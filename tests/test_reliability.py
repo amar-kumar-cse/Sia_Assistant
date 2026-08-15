@@ -1,10 +1,23 @@
 """
-Unit tests for utils/reliability.py safety wrapper and crash guard.
+Comprehensive Phase 6 Reliability & Stress Test Suite for Sia Assistant.
+Tests API invalid keys, network drops, timeouts, rapid-fire stress loops, and OAuth expiry fallbacks.
 """
 
 import pytest
 import asyncio
-from utils.reliability import safe_async_call, safe_sync_call, global_exception_handler
+import time
+import psutil
+import os
+from unittest.mock import patch, MagicMock
+
+from utils.reliability import (
+    safe_async_call,
+    safe_sync_call,
+    global_exception_handler,
+    asyncio_exception_handler
+)
+from engine.brain import think
+from engine.productivity import productivity_engine
 
 
 @pytest.mark.asyncio
@@ -69,8 +82,76 @@ def test_safe_sync_call_exception():
     assert res["message"] == "Sync error caught"
 
 
-def test_global_exception_handler_keyboard_interrupt(mocker=None):
-    # Ensure KeyboardInterrupt is passed to default sys.__excepthook__
+def test_gemini_invalid_key_graceful_fallback():
+    """Test 1: Gemini API call with invalid/expired key returns graceful fallback instead of crashing."""
+    with patch("google.generativeai.GenerativeModel.generate_content", side_effect=Exception("400 Invalid API Key")):
+        res = think("Hello Sia")
+        assert isinstance(res, dict)
+        assert res.get("emotion") in ["error", "default", "happy"]
+        assert "text" in res
+        assert len(res["text"]) > 0
+
+
+def test_network_unreachable_graceful_fallback():
+    """Test 2: Network unreachable during Gemini / Gmail / Calendar call asserts graceful fallback."""
+    with patch("google.generativeai.GenerativeModel.generate_content", side_effect=OSError("Network unreachable")):
+        res = think("Test prompt")
+        assert isinstance(res, dict)
+        assert "text" in res
+
+    with patch("googleapiclient.discovery.build", side_effect=OSError("Connection Refused")):
+        cal_res = productivity_engine.get_calendar_events()
+        assert isinstance(cal_res, list)
+        assert len(cal_res) > 0
+
+
+def test_timeout_exceeded_clean_fallback():
+    """Test 3: Exceeded timeout response times out cleanly without hanging."""
+    @safe_sync_call(timeout_seconds=0.2, fallback_value={"success": False, "message": "Slow response timeout"}, max_retries=0)
+    def slow_external_api():
+        time.sleep(1.5)
+        return "Finished"
+
+    res = slow_external_api()
+    assert isinstance(res, dict)
+    assert res["success"] is False
+    assert "timeout" in res["message"].lower()
+
+
+def test_rapid_fire_sequential_commands_stress():
+    """Test 4: Rapid-fire 20 sequential commands in a short loop without unhandled exceptions or memory explosion."""
+    process = psutil.Process(os.getpid())
+    initial_mem = process.memory_info().rss
+
+    mock_resp = MagicMock()
+    mock_resp.text = "[EMOTION:happy] Quick response"
+    mock_resp.candidates = []
+
+    with patch("google.generativeai.GenerativeModel.generate_content", return_value=mock_resp):
+        for i in range(20):
+            res = think(f"Quick test command #{i}")
+            assert isinstance(res, dict)
+            assert "text" in res
+
+    final_mem = process.memory_info().rss
+    mem_diff_mb = (final_mem - initial_mem) / (1024 * 1024)
+    # Memory growth should be under 50MB for 20 simple calls
+    assert mem_diff_mb < 50.0
+
+
+def test_expired_oauth_token_reconnect_fallback():
+    """Test 5: Simulated expired OAuth token returns clear fallback message, not a crash."""
+    with patch("os.path.exists", return_value=True), \
+         patch("google.oauth2.credentials.Credentials.from_authorized_user_file", side_effect=Exception("Token expired and refresh failed")):
+        res = productivity_engine.get_unread_emails()
+        assert isinstance(res, (str, dict))
+        if isinstance(res, dict):
+            assert res.get("success") is False
+        else:
+            assert ("gmail" in res.lower() or "credentials" in res.lower() or "token" in res.lower() or "error" in res.lower())
+
+
+def test_global_exception_handler_keyboard_interrupt():
     import sys
     try:
         global_exception_handler(KeyboardInterrupt, KeyboardInterrupt("ctrl+c"), None)
